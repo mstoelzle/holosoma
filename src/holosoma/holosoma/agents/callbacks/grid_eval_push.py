@@ -401,6 +401,7 @@ class GridEvalPushCallback(RLEvalCallback):
             self._get_env()._apply_force_in_physics_step = self._original_apply_force
 
         # Record which conditions actually fired
+        assert self._push_fired is not None
         num_c = self._recording_cb.num_conditions
         self._recording_cb.set_metadata(
             "push_fired_per_condition",
