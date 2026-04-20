@@ -369,6 +369,10 @@ class GridEvalPushCallback(RLEvalCallback):
             self._try_activate_pushes()
 
         # Decrement push timers, expire finished pushes
+        assert self._push_active is not None
+        assert self._push_steps_remaining is not None
+        assert self._push_force_w is not None
+        assert self._push_fired is not None
         active_mask = self._push_active[:num_c]
         self._push_steps_remaining[:num_c][active_mask] -= 1
 
