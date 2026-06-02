@@ -8,19 +8,18 @@ retargeting loader converts those positions from Y-up to Holosoma's Z-up frame.
 
 from __future__ import annotations
 
-import csv
 import sys
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import tyro
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from lafan1 import extract, utils  # type: ignore[import-not-found]
+from bvh_global_positions import extract_bvh_directory
 
 EXPECTED_100STYLE_JOINTS = [
     "Hips",
@@ -116,12 +115,6 @@ def _load_frame_cuts(csv_path: Path | None) -> dict[str, tuple[int, int]]:
     return cuts
 
 
-def extract_global_positions(bvh_file_path: Path) -> tuple[np.ndarray, list[str]]:
-    anim = extract.read_bvh(str(bvh_file_path))
-    _, global_positions = utils.quat_fk(anim.quats, anim.pos, anim.parents)
-    return global_positions / 100.0, anim.bones
-
-
 @dataclass
 class Config:
     """Configuration for extracting 100STYLE BVH global positions."""
@@ -134,37 +127,20 @@ class Config:
 
 
 def main(cfg: Config) -> None:
-    input_dir = Path(cfg.input_dir)
-    output_dir = Path(cfg.output_dir)
-    if cfg.downsample < 1:
-        raise ValueError("downsample must be >= 1")
-    if not input_dir.exists():
-        raise FileNotFoundError(f"Input directory not found: {input_dir}")
-
     frame_cuts = _load_frame_cuts(Path(cfg.frame_cuts_csv) if cfg.frame_cuts_csv else None)
-    bvh_files = sorted(input_dir.rglob("*.bvh"))
-    if not bvh_files:
-        raise FileNotFoundError(f"No .bvh files found under {input_dir}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    for bvh_path in bvh_files:
-        positions, joint_names = extract_global_positions(bvh_path)
-        if cfg.strict_joints and joint_names != EXPECTED_100STYLE_JOINTS:
-            raise ValueError(
-                f"Unexpected joint order in {bvh_path}: {joint_names}. "
-                f"Expected: {EXPECTED_100STYLE_JOINTS}"
-            )
+    def frame_window_for_path(bvh_path: Path) -> tuple[int, int] | None:
+        return frame_cuts.get(bvh_path.stem)
 
-        stem = bvh_path.stem
-        if stem in frame_cuts:
-            start, end = frame_cuts[stem]
-            positions = positions[start:end]
-
-        positions = positions[:: cfg.downsample]
-        rel_stem = bvh_path.relative_to(input_dir).with_suffix("").as_posix().replace("/", "__")
-        output_path = output_dir / f"{rel_stem}.npy"
-        np.save(str(output_path), positions)
-        print(f"Saved {output_path} | frames={positions.shape[0]} joints={positions.shape[1]}")
+    extract_bvh_directory(
+        input_dir=Path(cfg.input_dir),
+        output_dir=Path(cfg.output_dir),
+        recursive=True,
+        preserve_subdirs=True,
+        downsample=cfg.downsample,
+        expected_joint_names=EXPECTED_100STYLE_JOINTS if cfg.strict_joints else None,
+        frame_window_for_path=frame_window_for_path,
+    )
 
 
 if __name__ == "__main__":

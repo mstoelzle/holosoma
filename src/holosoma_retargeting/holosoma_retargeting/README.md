@@ -63,7 +63,7 @@ We need some data processing files from the [LAFAN GitHub repo](https://github.c
 cd holosoma_retargeting/data_utils/
 git clone https://github.com/ubisoft/ubisoft-laforge-animation-dataset.git
 mv ubisoft-laforge-animation-dataset/lafan1 .
-python extract_global_positions.py --input_dir DATA_FOLDER_PATH/lafan --output_dir ../demo_data/lafan
+python extract_lafan_global_positions.py --input-dir DATA_FOLDER_PATH/lafan --output-dir ../demo_data/lafan
 ```
 
 This will convert the BVH files to `.npy` format with global joint positions.
