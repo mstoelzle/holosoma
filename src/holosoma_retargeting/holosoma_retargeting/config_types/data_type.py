@@ -37,6 +37,32 @@ LAFAN_DEMO_JOINTS = [
     "LeftHand",
 ]
 
+STYLE100_DEMO_JOINTS = [
+    "Hips",
+    "Chest",
+    "Chest2",
+    "Chest3",
+    "Chest4",
+    "Neck",
+    "Head",
+    "RightCollar",
+    "RightShoulder",
+    "RightElbow",
+    "RightWrist",
+    "LeftCollar",
+    "LeftShoulder",
+    "LeftElbow",
+    "LeftWrist",
+    "RightHip",
+    "RightKnee",
+    "RightAnkle",
+    "RightToe",
+    "LeftHip",
+    "LeftKnee",
+    "LeftAnkle",
+    "LeftToe",
+]
+
 SMPLH_DEMO_JOINTS = [
     "Pelvis",
     "L_Hip",
@@ -209,6 +235,23 @@ JOINTS_MAPPINGS = {
         "LeftHand": "left_hand_sphere_link",
         "RightHand": "right_hand_sphere_link",
     },
+    ("100style", "g1"): {
+        "Hips": "pelvis_contour_link",
+        "LeftHip": "left_hip_pitch_link",
+        "RightHip": "right_hip_pitch_link",
+        "LeftKnee": "left_knee_link",
+        "RightKnee": "right_knee_link",
+        "LeftShoulder": "left_shoulder_roll_link",
+        "RightShoulder": "right_shoulder_roll_link",
+        "LeftElbow": "left_elbow_link",
+        "RightElbow": "right_elbow_link",
+        "LeftAnkle": "left_ankle_intermediate_1_link",
+        "RightAnkle": "right_ankle_intermediate_1_link",
+        "LeftToe": "left_ankle_roll_sphere_5_link",
+        "RightToe": "right_ankle_roll_sphere_5_link",
+        "LeftWrist": "left_rubber_hand_link",
+        "RightWrist": "right_rubber_hand_link",
+    },
     ("smplh", "g1"): {
         "Pelvis": "pelvis_contour_link",
         "L_Hip": "left_hip_pitch_link",
@@ -299,6 +342,7 @@ JOINTS_MAPPINGS = {
 # Data format specific constants
 TOE_NAMES_BY_FORMAT = {
     "lafan": ["LeftToeBase", "RightToeBase"],
+    "100style": ["LeftToe", "RightToe"],
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
     "smplx": ["L_Foot", "R_Foot"],
@@ -315,6 +359,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "lafan": {
         "default_scale_factor": 1.27 / 1.7,
     },
+    "100style": {
+        "default_human_height": 1.82,
+    },
     "mocap": {
         "default_human_height": 1.78,
     },
@@ -325,6 +372,7 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
 # No need to update any Literal types - DataFormat is now str with runtime validation
 DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "lafan": LAFAN_DEMO_JOINTS,
+    "100style": STYLE100_DEMO_JOINTS,
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,

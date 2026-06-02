@@ -215,6 +215,15 @@ def load_motion_data(
             # LAFAN-specific spine adjustment
             human_joints[:, spine_joint_idx, -1] -= 0.06
             smpl_scale = motion_data_config.default_scale_factor or 1.0
+        elif data_format == "100style":
+            npy_path = data_path / f"{task_name}.npy"
+            if not npy_path.exists():
+                raise FileNotFoundError(f"100STYLE data file not found: {npy_path}")
+
+            human_joints = np.load(str(npy_path))
+            human_joints = transform_y_up_to_z_up(human_joints)
+            default_human_height = motion_data_config.default_human_height or 1.82
+            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
         elif data_format == "smplh":  # smplh
             pt_path = data_path / f"{task_name}.pt"
             if not pt_path.exists():
@@ -400,6 +409,12 @@ def _compute_q_init_base(
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate(
                 [human_joints[0, spine_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
+            )
+        elif data_format == "100style":
+            hips_joint_idx = constants.DEMO_JOINTS.index("Hips")
+            human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
+            q_init_base = np.concatenate(
+                [human_joints[0, hips_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
             )
         else:  # smplh
             _, human_quat_init = transform_from_human_to_world(

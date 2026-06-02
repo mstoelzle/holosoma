@@ -82,6 +82,38 @@ python examples/robot_retarget.py --data_path demo_data/lafan --task-type robot_
 python examples/parallel_robot_retarget.py --data-dir demo_data/lafan --task-type robot_only --data_format lafan --save_dir demo_results_parallel/g1/robot_only/lafan --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
 ```
 
+### 100STYLE
+
+#### Download the Original 100STYLE BVH Data
+
+1. Download the original BVH-only 100STYLE dataset from the official 100STYLE page or Zenodo.
+2. Extract the BVH files to a data folder, for example `DATA_FOLDER_PATH/100STYLE`.
+3. If available, keep `Frame_Cuts.csv` nearby so the extractor can trim leading and trailing T-pose frames.
+
+#### Convert the Original 100STYLE BVH Format for Motion Retargeting
+
+```bash
+cd holosoma_retargeting/data_utils/
+python extract_100style_global_positions.py \
+  --input-dir DATA_FOLDER_PATH/100STYLE \
+  --output-dir ../demo_data/100style \
+  --frame-cuts-csv DATA_FOLDER_PATH/Frame_Cuts.csv
+```
+
+This creates one `.npy` file per BVH sequence with global joint positions in meters. Use `--downsample 2` or a larger factor if full 60 fps retargeting is too slow.
+
+#### Single Sequence Retargeting on 100STYLE
+
+```bash
+python examples/robot_retarget.py --data_path demo_data/100style --task-type robot_only --task-name Aeroplane_FW --data_format 100style --task-config.ground-range -10 10 --save_dir demo_results/g1/robot_only/100style --retargeter.debug --retargeter.visualize --retargeter.foot-sticking-tolerance 0.02
+```
+
+#### Batch Processing for Motion Retargeting on 100STYLE
+
+```bash
+python examples/parallel_robot_retarget.py --data-dir demo_data/100style --task-type robot_only --data_format 100style --save_dir demo_results_parallel/g1/robot_only/100style --task-config.object-name ground --task-config.ground-range -10 10 --retargeter.foot-sticking-tolerance 0.02
+```
+
 ### AMASS SMPL-X
 
 #### Download the Original AMASS Data

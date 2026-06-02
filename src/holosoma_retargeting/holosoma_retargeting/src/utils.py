@@ -711,7 +711,10 @@ def extract_foot_sticking_sequence_velocity(smpl_joints, demo_joints, foot_names
     right_toe_velocity = np.concatenate([[velocity_threshold + 1], right_toe_velocity])
 
     return [
-        {"L_Toe": left_toe_velocity[i] <= velocity_threshold, "R_Toe": right_toe_velocity[i] <= velocity_threshold}
+        {
+            foot_names[0]: left_toe_velocity[i] <= velocity_threshold,
+            foot_names[1]: right_toe_velocity[i] <= velocity_threshold,
+        }
         for i in range(len(smpl_joints))
     ]
 
@@ -763,12 +766,18 @@ def estimate_human_orientation(human_joints, joint_names, frame_idx=0):
     Returns:
         np.ndarray: Quaternion [w, x, y, z] representing the human's global orientation
     """
-    # For LAFAN
-    if "Hips" in joint_names:
+    if {"Hips", "Spine", "LeftUpLeg", "RightUpLeg"}.issubset(joint_names):
+        # For LAFAN
         hips_idx = joint_names.index("Hips")
         spine_idx = joint_names.index("Spine")
         left_hip_idx = joint_names.index("LeftUpLeg")
         right_hip_idx = joint_names.index("RightUpLeg")
+    elif {"Hips", "Chest", "LeftHip", "RightHip"}.issubset(joint_names):
+        # For 100STYLE BVH
+        hips_idx = joint_names.index("Hips")
+        spine_idx = joint_names.index("Chest")
+        left_hip_idx = joint_names.index("LeftHip")
+        right_hip_idx = joint_names.index("RightHip")
     else:
         # For SMPLH (OMOMO_new)
         hips_idx = joint_names.index("Pelvis")
