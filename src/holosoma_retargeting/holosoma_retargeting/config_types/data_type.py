@@ -173,6 +173,32 @@ SMPLX_DEMO_JOINTS = [
     "R_Wrist",
 ]
 
+XSENS_DEMO_JOINTS = [
+    "Pelvis",
+    "L5",
+    "L3",
+    "T12",
+    "T8",
+    "Neck",
+    "Head",
+    "Right Shoulder",
+    "Right Upper Arm",
+    "Right Forearm",
+    "Right Hand",
+    "Left Shoulder",
+    "Left Upper Arm",
+    "Left Forearm",
+    "Left Hand",
+    "Right Upper Leg",
+    "Right Lower Leg",
+    "Right Foot",
+    "Right Toe",
+    "Left Upper Leg",
+    "Left Lower Leg",
+    "Left Foot",
+    "Left Toe",
+]
+
 # Joint mappings - organized by (data_format, robot_type)
 JOINTS_MAPPINGS = {
     ("lafan", "g1"): {
@@ -294,6 +320,25 @@ JOINTS_MAPPINGS = {
         "LeftFoot": "Ankle_Cross_Left",
         "RightFoot": "Ankle_Cross_Right",
     },
+    ("xsens", "g1"): {
+        "Pelvis": "pelvis_contour_link",
+        "L5": "torso_link",
+        "Head": "head_link",
+        "Left Upper Leg": "left_hip_pitch_link",
+        "Right Upper Leg": "right_hip_pitch_link",
+        "Left Lower Leg": "left_knee_link",
+        "Right Lower Leg": "right_knee_link",
+        "Left Foot": "left_ankle_intermediate_1_link",
+        "Right Foot": "right_ankle_intermediate_1_link",
+        "Left Toe": "left_ankle_roll_sphere_5_link",
+        "Right Toe": "right_ankle_roll_sphere_5_link",
+        "Left Upper Arm": "left_shoulder_roll_link",
+        "Right Upper Arm": "right_shoulder_roll_link",
+        "Left Forearm": "left_elbow_link",
+        "Right Forearm": "right_elbow_link",
+        "Left Hand": "left_rubber_hand_link",
+        "Right Hand": "right_rubber_hand_link",
+    },
 }
 
 # Data format specific constants
@@ -302,6 +347,7 @@ TOE_NAMES_BY_FORMAT = {
     "smplh": ["L_Toe", "R_Toe"],
     "mocap": ["LeftToeBase", "RightToeBase"],
     "smplx": ["L_Foot", "R_Foot"],
+    "xsens": ["Left Toe", "Right Toe"],
 }
 
 
@@ -318,6 +364,9 @@ DATA_FORMAT_CONSTANTS: dict[str, FormatConstants] = {
     "mocap": {
         "default_human_height": 1.78,
     },
+    "xsens": {
+        "default_human_height": 1.78,
+    },
 }
 
 # Unified registry: Maps format name to demo joints
@@ -328,6 +377,7 @@ DEMO_JOINTS_REGISTRY: dict[str, list[str]] = {
     "smplh": SMPLH_DEMO_JOINTS,
     "mocap": MOCAP_DEMO_JOINTS,
     "smplx": SMPLX_DEMO_JOINTS,
+    "xsens": XSENS_DEMO_JOINTS,
 }
 
 # Type alias for data formats - use str to allow dynamic data formats via DEMO_JOINTS_REGISTRY
@@ -363,6 +413,9 @@ class MotionDataConfig:
     # Optional overrides - if None, will use defaults from data_format
     demo_joints: list[str] | None = None
     joints_mapping: dict[str, str] | None = None
+    target_fps: float | None = 30.0
+    frame_start: int = 0
+    max_frames: int | None = None
 
     @property
     def resolved_demo_joints(self) -> list[str]:

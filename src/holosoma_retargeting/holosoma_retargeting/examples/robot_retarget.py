@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -26,6 +27,10 @@ from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noq
 from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
+from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
+    load_xsens_hdf5_positions,
+    resolve_xsens_hdf5_path,
+)
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
@@ -63,6 +68,8 @@ DEFAULT_SAVE_DIRS = {
     "object_interaction": "demo_results/{robot}/object_interaction/omomo",
     "climbing": "demo_results/{robot}/climbing/mocap_climb",
 }
+
+RETARGETING_OUTPUT_FPS = 30.0
 
 
 # Constants for numpy arrays (not in dataclass to avoid tyro parsing issues)
@@ -239,6 +246,21 @@ def load_motion_data(
             human_joints = human_data["global_joint_positions"]
             human_height = human_data["height"]
             smpl_scale = constants.ROBOT_HEIGHT / human_height
+        elif data_format == "xsens":
+            hdf5_path = resolve_xsens_hdf5_path(data_path, task_name)
+            target_fps = motion_data_config.target_fps if motion_data_config.target_fps is not None else None
+            if target_fps is None:
+                target_fps = RETARGETING_OUTPUT_FPS
+            xsens_motion = load_xsens_hdf5_positions(
+                hdf5_path,
+                target_fps=target_fps,
+                frame_start=motion_data_config.frame_start,
+                max_frames=motion_data_config.max_frames,
+            )
+            human_joints = xsens_motion.positions_m
+
+            default_human_height = motion_data_config.default_human_height or 1.78
+            smpl_scale = constants.ROBOT_HEIGHT / default_human_height
         else:
             # For other custom data format, if it uses consistent .npz file like SMPLX,
             # you can use the same logic as SMPLX.
@@ -394,12 +416,13 @@ def _compute_q_init_base(
         q_init_base in MuJoCo order: [0:3] position, [3:7] quaternion, [7:] joints
     """
     if task_type == "robot_only":
-        if data_format == "lafan":
-            spine_joint_idx = constants.DEMO_JOINTS.index("Spine1")
+        if data_format in {"lafan", "xsens"}:
+            root_joint_name = "Spine1" if data_format == "lafan" else "Pelvis"
+            root_joint_idx = constants.DEMO_JOINTS.index(root_joint_name)
             human_quat_init = estimate_human_orientation(human_joints, constants.DEMO_JOINTS)
             # MuJoCo order: pos first, then quat
             q_init_base = np.concatenate(
-                [human_joints[0, spine_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
+                [human_joints[0, root_joint_idx, :3], human_quat_init, np.zeros(constants.ROBOT_DOF)]
             )
         else:  # smplh
             _, human_quat_init = transform_from_human_to_world(
@@ -624,12 +647,10 @@ def main(cfg: RetargetingConfig) -> None:
         cfg.robot_config = RobotConfig(robot_type=robot)
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
+        cfg.motion_data_config = replace(cfg.motion_data_config, data_format=data_format, robot_type=robot)
 
     # Task-specific object setup: set default object_dir for climbing if not provided
     if task_type == "climbing" and cfg.task_config.object_dir is None:
-        from dataclasses import replace
-
         cfg.task_config = replace(cfg.task_config, object_dir=data_path / task_name)
 
     constants = create_task_constants(

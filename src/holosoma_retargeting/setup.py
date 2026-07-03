@@ -28,5 +28,6 @@ setup(
         "cvxpy",
         "libigl",
         "tyro",
+        "h5py",
     ],
 )

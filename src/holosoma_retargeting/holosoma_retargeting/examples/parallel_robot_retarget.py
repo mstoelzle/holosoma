@@ -14,6 +14,7 @@ import sys
 # Add src to path for direct execution
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -87,6 +88,11 @@ def find_files(data_dir: Path, data_format: str, object_name: str | None = None)
     if data_format == "smplx":
         # SMPL-X: .npz files in root directory
         files = [str(p) for p in data_dir.glob("*.npz")]
+        return sorted(files)
+    if data_format == "xsens":
+        # ActionNet/Xsens HDF5 files in root directory
+        files = [str(p) for p in data_dir.glob("*.hdf5")]
+        files.extend(str(p) for p in data_dir.glob("*.h5"))
         return sorted(files)
     # For other data format, default to be consistent with SMPL-X
     files = [str(p) for p in data_dir.glob("*.npz")]
@@ -324,7 +330,7 @@ def main(cfg: ParallelRetargetingConfig) -> None:
         cfg.robot_config = RobotConfig(robot_type=robot)
 
     if cfg.motion_data_config.robot_type != robot or cfg.motion_data_config.data_format != data_format:
-        cfg.motion_data_config = MotionDataConfig(data_format=data_format, robot_type=robot)
+        cfg.motion_data_config = replace(cfg.motion_data_config, data_format=data_format, robot_type=robot)
 
     if task_type == "robot_only":
         files = find_files(data_dir, data_format)

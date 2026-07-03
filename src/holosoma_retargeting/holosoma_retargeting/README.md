@@ -57,6 +57,37 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-typ
 
 **Note**: Add `--augmentation` to run original sequences and sequences with augmentation (for object interaction and climbing tasks).
 
+## Xsens Tennis Retargeting
+
+ActionNet-style Xsens HDF5 files can be retargeted as robot-only G1 motions with `--data_format xsens`.
+The loader reads `xsens-segments/body_position_xyz_m` when available, otherwise `xsens-segments/position_cm`,
+uses the Xsens stream timestamps to sample at 30 Hz, keeps `body_position_xyz_m` in its z-up convention, and converts
+legacy `position_cm` streams from y-up to the retargeting z-up frame.
+
+```bash
+# Single Xsens tennis sequence
+python examples/robot_retarget.py \
+    --data_path demo_data/xsens_tennis \
+    --task-type robot_only \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_01 \
+    --data_format xsens \
+    --task-config.ground-range -3 3 \
+    --save_dir demo_results/g1/robot_only/xsens_tennis \
+    --retargeter.foot-sticking-tolerance 0.02
+
+# Batch all Xsens tennis HDF5 files in the directory
+python examples/parallel_robot_retarget.py \
+    --data-dir demo_data/xsens_tennis \
+    --task-type robot_only \
+    --data_format xsens \
+    --task-config.ground-range -3 3 \
+    --save_dir demo_results_parallel/g1/robot_only/xsens_tennis \
+    --retargeter.foot-sticking-tolerance 0.02
+```
+
+The Xsens tennis files are local demo inputs; this code path works when `.hdf5`/`.h5` files are present in
+`demo_data/xsens_tennis`, but the retargeting code itself does not require those large files to be tracked by Git.
+
 ## Data Preparation
 
 We provide `demo_data/` for fast testing. To test on more motion sequences, please follow the instructions below to download and prepare the data.
