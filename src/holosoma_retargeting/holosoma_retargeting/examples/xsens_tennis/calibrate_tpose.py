@@ -12,7 +12,7 @@ src_root = Path(__file__).resolve().parents[3]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.src.xsens_tpose_calibration import (  # noqa: E402
+from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
     XsensTposeCalibrationConfig,
     resolve_xsens_tennis_hdf5_path,
     save_xsens_tpose_calibration,

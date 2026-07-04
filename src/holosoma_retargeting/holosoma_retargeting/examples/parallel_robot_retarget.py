@@ -31,6 +31,7 @@ from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 # Import reusable functions from robot_retarget.py
 from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
+    RETARGETING_OUTPUT_FPS,
     build_retargeter_kwargs_from_config,
     create_task_constants,
     initialize_robot_pose,
@@ -42,10 +43,12 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
+from holosoma_retargeting.data_utils.xsens_hdf5 import load_xsens_hdf5_motion  # noqa: E402
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
     extract_foot_sticking_sequence_velocity,
     preprocess_motion_data,
 )
+from holosoma_retargeting.xsens.orientation_tracking import load_xsens_orientation_targets  # noqa: E402
 
 # ----------------------------- Constants -----------------------------
 
@@ -188,6 +191,32 @@ def process_single_task(args):
     human_joints, object_poses, smpl_scale = load_motion_data(
         task_type, data_format, Path(file_path).parent, task_name, constants, motion_data_config
     )
+    orientation_targets = None
+    if retargeter.orientation.enable:
+        if data_format != "xsens" or task_type != "robot_only":
+            raise ValueError("Orientation-aware retargeting currently supports only robot_only Xsens data")
+        if retargeter.orientation.calibration_path is None:
+            raise ValueError("--retargeter.orientation.calibration-path is required when orientation tracking is enabled")
+        target_fps = motion_data_config.target_fps if motion_data_config.target_fps is not None else RETARGETING_OUTPUT_FPS
+        xsens_motion = load_xsens_hdf5_motion(
+            file_path,
+            target_fps=target_fps,
+            frame_start=motion_data_config.frame_start,
+            max_frames=motion_data_config.max_frames,
+            include_orientations=True,
+        )
+        if xsens_motion.quaternions_wijk is None:
+            raise RuntimeError("Xsens orientation tracking requested but no quaternions were loaded")
+        orientation_targets = load_xsens_orientation_targets(
+            calibration_path=retargeter.orientation.calibration_path,
+            motion_quaternions_wijk=xsens_motion.quaternions_wijk,
+            segment_names=xsens_motion.segment_names,
+        )
+        if orientation_targets.orientation_target_rotations.shape[0] != human_joints.shape[0]:
+            raise ValueError(
+                "Orientation target frame count does not match loaded motion data: "
+                f"{orientation_targets.orientation_target_rotations.shape[0]} vs {human_joints.shape[0]}"
+            )
 
     # Preserve original data (preprocess_motion_data modifies them in place)
     human_joints_original = human_joints.copy()
@@ -302,6 +331,7 @@ def process_single_task(args):
             foot_sticking_sequences=foot_sticking_sequences,
             q_a_init=q_init,
             q_nominal_list=q_nominal,
+            orientation_targets=orientation_targets,
             original=(k == 0),
             dest_res_path=file_name,
         )

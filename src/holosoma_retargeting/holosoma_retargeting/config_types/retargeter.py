@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,26 @@ class SelfCollisionConfig:
 
     tolerance: float = 0.02
     """Minimum distance (meters) to maintain between body pairs."""
+
+
+@dataclass(frozen=True)
+class OrientationTrackingConfig:
+    """Configuration for additive Xsens orientation and segment-axis tracking."""
+
+    enable: bool = False
+    """Whether to enable orientation-aware retargeting costs."""
+
+    calibration_path: Path | None = None
+    """Path to the Xsens T-pose calibration artifact used for orientation/axis correspondences."""
+
+    orientation_weight: float = 2.0
+    """Weight for full segment orientation tracking residuals."""
+
+    axis_weight: float = 5.0
+    """Global weight for segment-axis direction tracking residuals."""
+
+    orientation_error_clip_rad: float = 0.7
+    """Maximum rotation-vector magnitude used by orientation residuals."""
 
 
 @dataclass(frozen=True)
@@ -84,6 +105,9 @@ class RetargeterConfig:
 
     self_collision: SelfCollisionConfig = field(default_factory=SelfCollisionConfig)
     """Configuration for self-collision avoidance."""
+
+    orientation: OrientationTrackingConfig = field(default_factory=OrientationTrackingConfig)
+    """Configuration for optional Xsens orientation and segment-axis tracking."""
 
     w_nominal_tracking_init: float = 5.0
     """Initial weight for nominal tracking cost."""

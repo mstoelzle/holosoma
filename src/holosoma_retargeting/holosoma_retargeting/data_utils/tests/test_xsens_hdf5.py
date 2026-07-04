@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import h5py
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
+    XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX,
+    load_xsens_hdf5_motion,
     load_xsens_hdf5_positions,
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
+from holosoma_retargeting.xsens.orientation_tracking import quat_wijk_to_matrix
 
 
 def _headings(segment_names: list[str]) -> list[str]:
@@ -125,6 +129,79 @@ def test_loader_applies_frame_window_after_time_sampling(tmp_path) -> None:
 
     assert motion.times_s.tolist() == [times_s[2], times_s[4]]
     np.testing.assert_allclose(motion.positions_m[:, 0, 0], [2.0, 4.0])
+
+
+def test_motion_loader_reads_sampled_dynamic_orientations_and_ignores_extra_segment(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_orientation_sample.hdf5"
+    times_s = np.arange(5, dtype=float) / 60.0
+    segment_names = XSENS_BODY_SEGMENT_NAMES[:10] + ["RightHandSword"] + XSENS_BODY_SEGMENT_NAMES[10:]
+    positions_m = np.zeros((5, len(segment_names), 3), dtype=float)
+    quaternions_wijk = np.tile(np.array([2.0, 0.0, 0.0, 0.0]), (5, len(segment_names), 1))
+    left_hand_source_idx = segment_names.index("Left Hand")
+    quaternions_wijk[2, left_hand_source_idx] = [0.0, 0.0, 0.0, 3.0]
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        position_group = hdf5_file.require_group("xsens-segments").create_group("body_position_xyz_m")
+        position_group.create_dataset("data", data=positions_m)
+        position_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
+        position_group.attrs["segment_names_body"] = str(segment_names)
+
+        orientation_group = hdf5_file["xsens-segments"].create_group("body_orientation_quaternion_wijk")
+        orientation_group.create_dataset("data", data=quaternions_wijk)
+        orientation_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
+        orientation_group.attrs["segment_names_body"] = str(segment_names)
+
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+
+    assert motion.quaternions_wijk is not None
+    assert motion.orientation_stream_name == "body_orientation_quaternion_wijk"
+    assert motion.quaternions_wijk.shape == (3, len(XSENS_BODY_SEGMENT_NAMES), 4)
+    left_hand_body_idx = XSENS_BODY_SEGMENT_NAMES.index("Left Hand")
+    np.testing.assert_allclose(motion.quaternions_wijk[1, left_hand_body_idx], [0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(np.linalg.norm(motion.quaternions_wijk, axis=-1), 1.0)
+
+
+def test_motion_loader_converts_position_cm_flat_orientations_to_retargeting_frame(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_position_cm_orientation_sample.hdf5"
+    times_s = np.array([0.0], dtype=float)
+    positions_cm = np.zeros((1, len(XSENS_BODY_SEGMENT_NAMES), 3), dtype=float)
+    positions_cm[0, 0] = [100.0, 200.0, 300.0]
+
+    rot_xsens = Rotation.from_euler("y", 90.0, degrees=True).as_matrix()
+    quat_xyzw = Rotation.from_matrix(rot_xsens).as_quat()
+    quat_wijk = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]], dtype=float)
+    quaternions_wijk = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (1, len(XSENS_BODY_SEGMENT_NAMES), 1))
+    quaternions_wijk[0, 0] = quat_wijk
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        _write_stream(hdf5_file, "position_cm", positions_cm, times_s)
+        orientation_group = hdf5_file["xsens-segments"].create_group("body_orientation_quaternion_wijk")
+        orientation_group.create_dataset("data", data=quaternions_wijk.reshape(1, -1))
+        orientation_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
+
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+
+    assert motion.quaternions_wijk is not None
+    np.testing.assert_allclose(motion.positions_m[0, 0], [1.0, 3.0, 2.0])
+    expected_rotation = XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX @ rot_xsens @ XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX.T
+    actual_rotation = quat_wijk_to_matrix(motion.quaternions_wijk[0, 0])
+    np.testing.assert_allclose(actual_rotation, expected_rotation, atol=1e-12)
+
+
+def test_motion_loader_errors_when_orientations_requested_but_missing(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_no_orientation.hdf5"
+    times_s = np.arange(3, dtype=float) / 30.0
+    positions_m = np.zeros((3, len(XSENS_BODY_SEGMENT_NAMES), 3), dtype=float)
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
+
+    try:
+        load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+    except KeyError as exc:
+        assert "body_orientation_quaternion_wijk" in str(exc)
+    else:
+        raise AssertionError("Expected a KeyError for missing dynamic Xsens orientations")
 
 
 def test_resolve_xsens_hdf5_path_accepts_task_stems_and_explicit_files(tmp_path) -> None:

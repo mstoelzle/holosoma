@@ -4,6 +4,7 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import cvxpy as cp  # type: ignore[import-not-found]
 import mujoco  # type: ignore[import-not-found]
@@ -16,7 +17,12 @@ from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 from tqdm import tqdm
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
-from holosoma_retargeting.config_types.retargeter import FootLockConfig, SelfCollisionConfig
+from holosoma_retargeting.config_types.retargeter import (
+    FootLockConfig,
+    OrientationTrackingConfig,
+    SelfCollisionConfig,
+)
+from holosoma_retargeting.xsens.orientation_tracking import XsensOrientationTargets
 
 # Add src to path for direct execution
 src_path = Path(__file__).parent.parent / "src"
@@ -57,6 +63,7 @@ class InteractionMeshRetargeter:
         foot_sticking_tolerance: float = 1e-3,
         foot_lock: FootLockConfig | None = None,
         self_collision: SelfCollisionConfig | None = None,
+        orientation: OrientationTrackingConfig | None = None,
         visualize: bool = False,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
@@ -109,6 +116,7 @@ class InteractionMeshRetargeter:
         self.foot_sticking_tolerance = foot_sticking_tolerance
         self._init_foot_lock(foot_lock)
         self._self_collision_config = self_collision
+        self.orientation_config = orientation or OrientationTrackingConfig()
 
         # Setup visualization if requested
         if self.visualize:
@@ -126,6 +134,14 @@ class InteractionMeshRetargeter:
         print("Loading robot model from: ", robot_xml_path)
 
         self.robot_data = mujoco.MjData(self.robot_model)
+        self._body_name_to_id = {
+            mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, i): i
+            for i in range(self.robot_model.nbody)
+        }
+        self._geom_name_to_id = {
+            mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, i): i
+            for i in range(self.robot_model.ngeom)
+        }
         self._init_self_collision(self._self_collision_config)
 
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
@@ -374,6 +390,7 @@ class InteractionMeshRetargeter:
         foot_sticking_sequences,
         q_a_init=None,
         q_nominal_list=None,
+        orientation_targets: XsensOrientationTargets | None = None,
         original=True,
         dest_res_path=None,
     ):
@@ -389,11 +406,27 @@ class InteractionMeshRetargeter:
             foot_sticking_sequences (list): List of foot sticking sequences for each frame.
             q_a_init (np.ndarray, optional): Initial robot configuration.
             q_a_nominal (np.ndarray, optional): Nominal robot configuration.
+            orientation_targets: Optional orientation and segment-axis targets for each frame.
 
         Returns:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
         num_frames = human_joint_motions.shape[0]
+        if orientation_targets is not None and not self.orientation_config.enable:
+            raise ValueError("orientation_targets were provided but retargeter.orientation.enable is False")
+        if self.orientation_config.enable and orientation_targets is None:
+            raise ValueError("retargeter.orientation.enable requires orientation_targets")
+        if orientation_targets is not None:
+            if orientation_targets.orientation_target_rotations.shape[0] != num_frames:
+                raise ValueError(
+                    "Orientation target frame count does not match motion frame count: "
+                    f"{orientation_targets.orientation_target_rotations.shape[0]} vs {num_frames}"
+                )
+            if orientation_targets.axis_target_vectors.shape[0] != num_frames:
+                raise ValueError(
+                    "Axis target frame count does not match motion frame count: "
+                    f"{orientation_targets.axis_target_vectors.shape[0]} vs {num_frames}"
+                )
         if q_nominal_list is not None:
             q_locked_list = q_nominal_list
         else:
@@ -407,6 +440,8 @@ class InteractionMeshRetargeter:
         tetrahedra = []
         obj_pts_demo_list = []  # scaled object pts
         obj_pts_list = []  # original size object pts
+        orientation_error_history = []
+        axis_error_history = []
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
@@ -470,10 +505,15 @@ class InteractionMeshRetargeter:
                     foot_sticking=foot_sticking_sequences[i],
                     w_nominal_tracking=w_nominal_tracking,
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
+                    orientation_targets=orientation_targets,
                     init_t=i == 0,
                     n_iter=50 if i == 0 else 10,
                     frame_idx=i,
                 )
+                if orientation_targets is not None:
+                    orientation_errors, axis_errors = self._orientation_tracking_errors(q, orientation_targets, i)
+                    orientation_error_history.append(orientation_errors)
+                    axis_error_history.append(axis_errors)
                 if self.debug:
                     robot_link_positions = self._get_robot_link_positions(
                         q, self.laplacian_match_links.values()
@@ -513,6 +553,27 @@ class InteractionMeshRetargeter:
             human_joints=human_joint_motions,
             fps=30,
             cost=cost,
+            orientation_error_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.orientation_names, dtype=str
+            ),
+            orientation_errors_rad=np.asarray(orientation_error_history, dtype=float),
+            axis_error_names=np.asarray([] if orientation_targets is None else orientation_targets.axis_names, dtype=str),
+            axis_errors_deg=np.asarray(axis_error_history, dtype=float),
+            active_orientation_mapping_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.orientation_names, dtype=str
+            ),
+            orientation_robot_link_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.orientation_robot_link_names, dtype=str
+            ),
+            axis_xsens_segment_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.axis_xsens_segment_names, dtype=str
+            ),
+            axis_robot_start_link_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.axis_robot_start_link_names, dtype=str
+            ),
+            axis_robot_end_link_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.axis_robot_end_link_names, dtype=str
+            ),
         )
         print("Saving results to path:", dest_res_path)
 
@@ -561,6 +622,7 @@ class InteractionMeshRetargeter:
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
+        orientation_targets: XsensOrientationTargets | None = None,
         verbose=False,
         init_t=False,
         frame_idx: int = 0,
@@ -727,6 +789,9 @@ class InteractionMeshRetargeter:
                 # if a full matrix was supplied, fall back to quad_form
                 obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
 
+        if orientation_targets is not None:
+            obj_terms.extend(self._orientation_tracking_objective_terms(q, dqa, orientation_targets, frame_idx))
+
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
         # -------- Solve with Clarabel --------
@@ -761,6 +826,124 @@ class InteractionMeshRetargeter:
             return False
 
         return any(start <= frame_idx <= end for start, end in self._foot_lock_windows.get(side, ()))
+
+    def _clip_rotvec(self, rotvec: np.ndarray) -> np.ndarray:
+        clip = float(self.orientation_config.orientation_error_clip_rad)
+        rotvec = np.asarray(rotvec, dtype=float)
+        norm = float(np.linalg.norm(rotvec))
+        if clip > 0.0 and norm > clip:
+            return rotvec * (clip / norm)
+        return rotvec
+
+    def _frame_pose(self, frame_name: str) -> tuple[np.ndarray, np.ndarray, int]:
+        """Return frame position, rotation, and owning body id for a body or geom name."""
+        if frame_name in self._body_name_to_id:
+            body_id = int(self._body_name_to_id[frame_name])
+            return (
+                self.robot_data.xpos[body_id].copy(),
+                self.robot_data.xmat[body_id].reshape(3, 3).copy(),
+                body_id,
+            )
+        if frame_name in self._geom_name_to_id:
+            geom_id = int(self._geom_name_to_id[frame_name])
+            body_id = int(self.robot_model.geom_bodyid[geom_id])
+            return (
+                self.robot_data.geom_xpos[geom_id].copy(),
+                self.robot_data.geom_xmat[geom_id].reshape(3, 3).copy(),
+                body_id,
+            )
+        raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
+
+    def _frame_position_jacobian(self, frame_name: str, point_offset: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+        position, rotation, body_id = self._frame_pose(frame_name)
+        if point_offset is not None:
+            position = position + rotation @ np.asarray(point_offset, dtype=float).reshape(3)
+        jacobian = self._calc_contact_jacobian_from_point(body_id, position, input_world=True)
+        return np.asarray(jacobian, dtype=float), np.asarray(position, dtype=float)
+
+    def _frame_rotational_jacobian(self, frame_name: str) -> tuple[np.ndarray, np.ndarray]:
+        position, rotation, body_id = self._frame_pose(frame_name)
+        Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
+        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, position.reshape(3, 1), int(body_id))
+        return np.asarray(Jr @ self._build_transform_qdot_to_qvel_fast(), dtype=float), rotation
+
+    def _axis_jacobian(self, start_frame: str, end_frame: str) -> tuple[np.ndarray, np.ndarray]:
+        J_start, p_start = self._frame_position_jacobian(start_frame)
+        J_end, p_end = self._frame_position_jacobian(end_frame)
+        delta = p_end - p_start
+        length = float(np.linalg.norm(delta))
+        if length < 1e-9:
+            return np.array([1.0, 0.0, 0.0]), np.zeros((3, self.robot_model.nq))
+        axis = delta / length
+        projector = (np.eye(3) - np.outer(axis, axis)) / length
+        return axis, projector @ (J_end - J_start)
+
+    def _orientation_tracking_objective_terms(
+        self,
+        q: np.ndarray,
+        dqa: cp.Variable,
+        orientation_targets: XsensOrientationTargets,
+        frame_idx: int,
+    ) -> list[Any]:
+        self.robot_data.qpos[:] = q
+        mujoco.mj_forward(self.robot_model, self.robot_data)
+        terms: list[Any] = []
+
+        for target_idx, link_name in enumerate(orientation_targets.orientation_robot_link_names):
+            target_rotation = orientation_targets.orientation_target_rotations[frame_idx, target_idx]
+            J_rot, current_rotation = self._frame_rotational_jacobian(link_name)
+            rotvec = Rotation.from_matrix(target_rotation @ current_rotation.T).as_rotvec()
+            rotvec = self._clip_rotvec(rotvec)
+            J_active = J_rot[:, self.q_a_indices]
+            terms.append(
+                self.orientation_config.orientation_weight
+                * cp.sum_squares(cp.Constant(J_active) @ dqa - cp.Constant(rotvec))
+            )
+
+        for axis_idx, axis_name in enumerate(orientation_targets.axis_names):
+            del axis_name
+            current_axis, J_axis = self._axis_jacobian(
+                orientation_targets.axis_robot_start_link_names[axis_idx],
+                orientation_targets.axis_robot_end_link_names[axis_idx],
+            )
+            target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
+            J_active = J_axis[:, self.q_a_indices]
+            weight = self.orientation_config.axis_weight * float(orientation_targets.axis_weights[axis_idx])
+            terms.append(
+                weight
+                * cp.sum_squares(cp.Constant(J_active) @ dqa + cp.Constant(current_axis - target_axis))
+            )
+
+        return terms
+
+    def _orientation_tracking_errors(
+        self,
+        q: np.ndarray,
+        orientation_targets: XsensOrientationTargets,
+        frame_idx: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        self.robot_data.qpos[:] = q
+        mujoco.mj_forward(self.robot_model, self.robot_data)
+
+        orientation_errors = []
+        for target_idx, link_name in enumerate(orientation_targets.orientation_robot_link_names):
+            target_rotation = orientation_targets.orientation_target_rotations[frame_idx, target_idx]
+            _, current_rotation, _ = self._frame_pose(link_name)
+            rotvec = Rotation.from_matrix(target_rotation @ current_rotation.T).as_rotvec()
+            orientation_errors.append(float(np.linalg.norm(rotvec)))
+
+        axis_errors = []
+        for axis_idx in range(len(orientation_targets.axis_names)):
+            current_axis, _ = self._axis_jacobian(
+                orientation_targets.axis_robot_start_link_names[axis_idx],
+                orientation_targets.axis_robot_end_link_names[axis_idx],
+            )
+            target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
+            dot = float(np.clip(np.dot(current_axis, target_axis), -1.0, 1.0))
+            axis_errors.append(float(np.degrees(np.arccos(dot))))
+
+        return np.asarray(orientation_errors, dtype=float), np.asarray(axis_errors, dtype=float)
 
     def _compute_self_collision_constraints(self, frame_idx: int):
         """Compute Jacobians and distances for self-collision body pairs.
@@ -827,6 +1010,7 @@ class InteractionMeshRetargeter:
         foot_sticking: tuple[bool, bool],
         w_nominal_tracking: float = 0.0,
         q_a_nominal: np.ndarray | None = None,
+        orientation_targets: XsensOrientationTargets | None = None,
         init_t: bool = False,
         n_iter: int = 10,
         frame_idx: int = 0,
@@ -845,6 +1029,7 @@ class InteractionMeshRetargeter:
                 foot_sticking=foot_sticking,
                 q_a_nominal=q_a_nominal,
                 w_nominal_tracking=w_nominal_tracking,
+                orientation_targets=orientation_targets,
                 init_t=init_t,
                 frame_idx=frame_idx,
             )
@@ -1288,15 +1473,12 @@ class InteractionMeshRetargeter:
         mujoco.mj_forward(self.robot_model, self.robot_data)
 
         for name, link_name in links.items():
-            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, link_name)
-
             if point_offsets is not None:
                 pC_B = point_offsets
             else:
-                pC_B = np.zeros(3)
+                pC_B = None
 
-            J = self._calc_contact_jacobian_from_point(body_id, pC_B)
-            pos_world = self.robot_data.xpos[body_id]
+            J, pos_world = self._frame_position_jacobian(link_name, pC_B)
 
             if obj_frame:
                 p_XC = obj_rot_inv @ (pos_world - obj_pos)
@@ -1328,14 +1510,7 @@ class InteractionMeshRetargeter:
         robot_link_positions = []
 
         for link_name in link_names:
-            # Get body ID from name
-            body_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, link_name)
-            if body_id == -1:
-                raise ValueError(f"Body {link_name} not found in Mujoco model")
-
-            # Get position in world frame
-            # xpos gives us the position of the body's center of mass in world coordinates
-            pos = self.robot_data.xpos[body_id].copy()
+            pos, _, _ = self._frame_pose(link_name)
             robot_link_positions.append(pos)
 
         return np.array(robot_link_positions)

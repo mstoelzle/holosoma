@@ -17,6 +17,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
+from holosoma_retargeting.xsens.orientation_tracking import build_xsens_axis_calibration_metadata
 
 
 CALIBRATION_POSITION_MAPPING = {
@@ -147,6 +148,12 @@ class XsensTposeCalibrationResult:
     active_orientation_mapping_names: list[str]
     robot_link_names: list[str]
     orientation_offsets_wijk: np.ndarray
+    axis_names: list[str]
+    axis_xsens_segment_names: list[str]
+    axis_local_tpose_xyz: np.ndarray
+    axis_robot_start_link_names: list[str]
+    axis_robot_end_link_names: list[str]
+    axis_weights: np.ndarray
     position_error_names: list[str]
     position_errors_m: np.ndarray
     axis_error_names: list[str]
@@ -661,6 +668,10 @@ def solve_xsens_tpose_calibration_from_data(
     active_offsets = [candidate_offsets[name] for name in active_mapping]
     all_position_errors = _position_errors(problem, qpos, CALIBRATION_POSITION_MAPPING)
     axis_errors = _axis_errors(problem, qpos)
+    axis_metadata = build_xsens_axis_calibration_metadata(
+        tpose_positions_m=target_positions,
+        tpose_quaternions_wijk=tpose.quaternions_wijk,
+    )
 
     return XsensTposeCalibrationResult(
         qpos=qpos.reshape(1, -1),
@@ -671,6 +682,12 @@ def solve_xsens_tpose_calibration_from_data(
         active_orientation_mapping_names=list(active_mapping.keys()),
         robot_link_names=list(active_mapping.values()),
         orientation_offsets_wijk=np.asarray(active_offsets, dtype=float).reshape(-1, 4),
+        axis_names=[str(value) for value in axis_metadata["axis_names"]],
+        axis_xsens_segment_names=[str(value) for value in axis_metadata["axis_xsens_segment_names"]],
+        axis_local_tpose_xyz=np.asarray(axis_metadata["axis_local_tpose_xyz"], dtype=float),
+        axis_robot_start_link_names=[str(value) for value in axis_metadata["axis_robot_start_link_names"]],
+        axis_robot_end_link_names=[str(value) for value in axis_metadata["axis_robot_end_link_names"]],
+        axis_weights=np.asarray(axis_metadata["axis_weights"], dtype=float),
         position_error_names=list(all_position_errors.keys()),
         position_errors_m=np.asarray(list(all_position_errors.values()), dtype=float),
         axis_error_names=list(axis_errors.keys()),
@@ -698,6 +715,12 @@ def save_xsens_tpose_calibration(result: XsensTposeCalibrationResult, path: str 
         active_orientation_mapping_names=np.asarray(result.active_orientation_mapping_names, dtype=str),
         robot_link_names=np.asarray(result.robot_link_names, dtype=str),
         orientation_offsets_wijk=result.orientation_offsets_wijk,
+        axis_names=np.asarray(result.axis_names, dtype=str),
+        axis_xsens_segment_names=np.asarray(result.axis_xsens_segment_names, dtype=str),
+        axis_local_tpose_xyz=result.axis_local_tpose_xyz,
+        axis_robot_start_link_names=np.asarray(result.axis_robot_start_link_names, dtype=str),
+        axis_robot_end_link_names=np.asarray(result.axis_robot_end_link_names, dtype=str),
+        axis_weights=result.axis_weights,
         position_error_names=np.asarray(result.position_error_names, dtype=str),
         position_errors_m=result.position_errors_m,
         axis_error_names=np.asarray(result.axis_error_names, dtype=str),

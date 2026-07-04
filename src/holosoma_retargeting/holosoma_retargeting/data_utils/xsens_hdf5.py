@@ -8,11 +8,21 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 
 XSENS_DEVICE_NAME = "xsens-segments"
 XSENS_TPOSE_DEVICE_NAME = "xsens-segments-tpose"
 XSENS_POSITION_STREAM_NAMES = ("body_position_xyz_m", "position_cm")
+XSENS_ORIENTATION_STREAM_NAME = "body_orientation_quaternion_wijk"
+XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+    ],
+    dtype=float,
+)
 
 XSENS_BODY_SEGMENT_NAMES = [
     "Pelvis",
@@ -50,6 +60,8 @@ class XsensHdf5Motion:
     stream_name: str
     segment_names: list[str]
     source_indices: list[int]
+    quaternions_wijk: np.ndarray | None = None
+    orientation_stream_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -156,6 +168,30 @@ def transform_xsens_stream_to_retargeting(positions: np.ndarray, stream_name: st
     return transform_xsens_y_up_to_retargeting_z_up(positions)
 
 
+def _quat_wijk_to_matrix(quaternions_wijk: np.ndarray) -> np.ndarray:
+    q = np.asarray(quaternions_wijk, dtype=float)
+    xyzw = np.stack([q[..., 1], q[..., 2], q[..., 3], q[..., 0]], axis=-1)
+    return Rotation.from_quat(xyzw.reshape(-1, 4)).as_matrix().reshape(q.shape[:-1] + (3, 3))
+
+
+def _matrix_to_quat_wijk(rotations: np.ndarray) -> np.ndarray:
+    rotations = np.asarray(rotations, dtype=float)
+    xyzw = Rotation.from_matrix(rotations.reshape(-1, 3, 3)).as_quat().reshape(rotations.shape[:-2] + (4,))
+    return np.stack([xyzw[..., 3], xyzw[..., 0], xyzw[..., 1], xyzw[..., 2]], axis=-1)
+
+
+def transform_xsens_orientation_stream_to_retargeting(
+    quaternions_wijk: np.ndarray,
+    stream_name: str,
+) -> np.ndarray:
+    """Convert Xsens world-frame orientations to the position stream's retargeting convention."""
+    if stream_name == "body_position_xyz_m":
+        return quaternions_wijk
+    rotations = _quat_wijk_to_matrix(quaternions_wijk)
+    basis = XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX
+    return _matrix_to_quat_wijk(basis @ rotations @ basis.T)
+
+
 def _get_position_stream(hdf5_file: Any) -> tuple[str, Any]:
     if XSENS_DEVICE_NAME not in hdf5_file:
         raise KeyError(f"No {XSENS_DEVICE_NAME} group found in the HDF5 file")
@@ -170,6 +206,18 @@ def _get_position_stream(hdf5_file: Any) -> tuple[str, Any]:
 
     expected = ", ".join(XSENS_POSITION_STREAM_NAMES)
     raise KeyError(f"No Xsens segment position stream found. Expected one of: {expected}")
+
+
+def _get_orientation_stream(hdf5_file: Any) -> Any:
+    if XSENS_DEVICE_NAME not in hdf5_file:
+        raise KeyError(f"No {XSENS_DEVICE_NAME} group found in the HDF5 file")
+    streams = hdf5_file[XSENS_DEVICE_NAME]
+    if XSENS_ORIENTATION_STREAM_NAME not in streams:
+        raise KeyError(f"No Xsens segment orientation stream found: {XSENS_ORIENTATION_STREAM_NAME}")
+    stream_group = streams[XSENS_ORIENTATION_STREAM_NAME]
+    if "data" not in stream_group or "time_s" not in stream_group:
+        raise KeyError(f"Xsens orientation stream is missing required 'data' or 'time_s': {XSENS_ORIENTATION_STREAM_NAME}")
+    return stream_group
 
 
 def _reshape_position_data(position_data: np.ndarray, segment_names: list[str] | None) -> np.ndarray:
@@ -205,20 +253,31 @@ def _reshape_static_position_data(position_data: np.ndarray, segment_names: list
 
 
 def _reshape_quaternion_data(quaternion_data: np.ndarray, segment_names: list[str] | None) -> np.ndarray:
+    if quaternion_data.ndim == 3 and quaternion_data.shape[-1] == 4:
+        return quaternion_data
     if quaternion_data.ndim == 2 and quaternion_data.shape[-1] == 4:
         return quaternion_data
     if quaternion_data.ndim == 3 and quaternion_data.shape[-1] == 4 and quaternion_data.shape[0] == 1:
         return quaternion_data[0]
     if quaternion_data.ndim == 1 and quaternion_data.shape[0] % 4 == 0:
         return quaternion_data.reshape(-1, 4)
+    if quaternion_data.ndim == 2 and quaternion_data.shape[1] % 4 == 0:
+        return quaternion_data.reshape(quaternion_data.shape[0], -1, 4)
 
     if segment_names is None:
         raise ValueError(f"Unsupported Xsens quaternion data shape: {quaternion_data.shape}")
     expected_flat_width = len(segment_names) * 4
+    if quaternion_data.ndim == 2 and quaternion_data.shape[1] == expected_flat_width:
+        return quaternion_data.reshape(quaternion_data.shape[0], len(segment_names), 4)
     if quaternion_data.ndim == 1 and quaternion_data.shape[0] == expected_flat_width:
         return quaternion_data.reshape(len(segment_names), 4)
 
     raise ValueError(f"Unsupported Xsens quaternion data shape: {quaternion_data.shape}")
+
+
+def _normalize_quaternions_wijk(quaternions: np.ndarray) -> np.ndarray:
+    quat_norms = np.linalg.norm(quaternions, axis=-1, keepdims=True)
+    return quaternions / np.maximum(quat_norms, 1e-12)
 
 
 def _normalize_segment_name(name: str) -> str:
@@ -290,8 +349,26 @@ def load_xsens_hdf5_positions(
     max_frames: int | None = None,
 ) -> XsensHdf5Motion:
     """Load Xsens body segment positions from an ActionNet-style HDF5 file."""
+    return load_xsens_hdf5_motion(
+        path,
+        target_fps=target_fps,
+        frame_start=frame_start,
+        max_frames=max_frames,
+        include_orientations=False,
+    )
+
+
+def load_xsens_hdf5_motion(
+    path: str | Path,
+    target_fps: float | None = 30.0,
+    frame_start: int = 0,
+    max_frames: int | None = None,
+    include_orientations: bool = False,
+) -> XsensHdf5Motion:
+    """Load Xsens body segment positions and, optionally, segment orientations."""
     h5py = _import_h5py()
     path = Path(path)
+    quaternions: np.ndarray | None = None
 
     with h5py.File(path, "r") as hdf5_file:
         stream_name, stream_group = _get_position_stream(hdf5_file)
@@ -299,6 +376,13 @@ def load_xsens_hdf5_positions(
 
         positions = np.asarray(stream_group["data"], dtype=float)
         times_s = np.asarray(stream_group["time_s"], dtype=float).reshape(-1)
+        orientation_segment_names = None
+        orientation_times_s = None
+        if include_orientations:
+            orientation_group = _get_orientation_stream(hdf5_file)
+            orientation_segment_names = _segment_names_from_attrs(orientation_group)
+            quaternions = np.asarray(orientation_group["data"], dtype=float)
+            orientation_times_s = np.asarray(orientation_group["time_s"], dtype=float).reshape(-1)
 
     positions = _reshape_position_data(positions, segment_names)
     selected_segment_names, source_indices = _body_segment_indices(segment_names, positions.shape[1])
@@ -307,12 +391,30 @@ def load_xsens_hdf5_positions(
 
     sample_indices = sample_indices_by_time(times_s, target_fps)
     sample_indices = _slice_sample_indices(sample_indices, frame_start, max_frames)
+    if include_orientations:
+        if quaternions is None or orientation_times_s is None:
+            raise RuntimeError("Internal error: orientation stream was not loaded")
+        quaternions = _reshape_quaternion_data(quaternions, orientation_segment_names)
+        selected_orientation_names, orientation_source_indices = _body_segment_indices(
+            orientation_segment_names, quaternions.shape[1]
+        )
+        if selected_orientation_names != selected_segment_names:
+            raise ValueError("Xsens position and orientation body segment selections differ")
+        if source_indices != orientation_source_indices:
+            raise ValueError("Xsens position and orientation source segment indices differ")
+        if orientation_times_s.shape != times_s.shape or not np.allclose(orientation_times_s, times_s):
+            raise ValueError("Xsens position and orientation streams must share timestamps for orientation tracking")
+        quaternions = _normalize_quaternions_wijk(quaternions[:, orientation_source_indices, :])
+        quaternions = transform_xsens_orientation_stream_to_retargeting(quaternions, stream_name)
+
     return XsensHdf5Motion(
         positions_m=positions[sample_indices],
         times_s=times_s[sample_indices],
         stream_name=stream_name,
         segment_names=selected_segment_names,
         source_indices=source_indices,
+        quaternions_wijk=None if quaternions is None else quaternions[sample_indices],
+        orientation_stream_name=XSENS_ORIENTATION_STREAM_NAME if include_orientations else None,
     )
 
 
@@ -368,8 +470,7 @@ def load_xsens_hdf5_tpose(path: str | Path, variant: str = "Tpose") -> XsensHdf5
     selected_segment_names, source_indices = _body_segment_indices(segment_names, positions.shape[0])
     positions = positions[source_indices]
     quaternions = quaternions[source_indices]
-    quat_norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
-    quaternions = quaternions / np.maximum(quat_norms, 1e-12)
+    quaternions = _normalize_quaternions_wijk(quaternions)
 
     return XsensHdf5Tpose(
         positions_m=positions,

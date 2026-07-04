@@ -28,11 +28,16 @@ from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # n
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
+    load_xsens_hdf5_motion,
     load_xsens_hdf5_positions,
     resolve_xsens_hdf5_path,
 )
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
+)
+from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
+    XsensOrientationTargets,
+    load_xsens_orientation_targets,
 )
 from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
@@ -495,6 +500,7 @@ def build_retargeter_kwargs_from_config(
         "penetration_tolerance": retargeter_config.penetration_tolerance,
         "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "self_collision": retargeter_config.self_collision,
+        "orientation": retargeter_config.orientation,
         "step_size": retargeter_config.step_size,
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
@@ -503,6 +509,41 @@ def build_retargeter_kwargs_from_config(
     if task_type == "climbing":
         kwargs["nominal_tracking_tau"] = retargeter_config.nominal_tracking_tau
     return kwargs
+
+
+def load_orientation_targets_for_retargeting(
+    *,
+    cfg: RetargetingConfig,
+    data_format: str,
+    task_type: str,
+) -> XsensOrientationTargets | None:
+    """Load optional Xsens orientation/axis targets for retargeting."""
+    orientation_cfg = cfg.retargeter.orientation
+    if not orientation_cfg.enable:
+        return None
+    if data_format != "xsens" or task_type != "robot_only":
+        raise ValueError("Orientation-aware retargeting currently supports only robot_only Xsens data")
+    if orientation_cfg.calibration_path is None:
+        raise ValueError("--retargeter.orientation.calibration-path is required when orientation tracking is enabled")
+
+    target_fps = cfg.motion_data_config.target_fps if cfg.motion_data_config.target_fps is not None else None
+    if target_fps is None:
+        target_fps = RETARGETING_OUTPUT_FPS
+    hdf5_path = resolve_xsens_hdf5_path(cfg.data_path, cfg.task_name)
+    xsens_motion = load_xsens_hdf5_motion(
+        hdf5_path,
+        target_fps=target_fps,
+        frame_start=cfg.motion_data_config.frame_start,
+        max_frames=cfg.motion_data_config.max_frames,
+        include_orientations=True,
+    )
+    if xsens_motion.quaternions_wijk is None:
+        raise RuntimeError("Xsens orientation tracking requested but no quaternions were loaded")
+    return load_xsens_orientation_targets(
+        calibration_path=orientation_cfg.calibration_path,
+        motion_quaternions_wijk=xsens_motion.quaternions_wijk,
+        segment_names=xsens_motion.segment_names,
+    )
 
 
 def initialize_robot_pose(
@@ -664,6 +705,12 @@ def main(cfg: RetargetingConfig) -> None:
     human_joints, object_poses, smpl_scale = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
+    orientation_targets = load_orientation_targets_for_retargeting(cfg=cfg, data_format=data_format, task_type=task_type)
+    if orientation_targets is not None and orientation_targets.orientation_target_rotations.shape[0] != human_joints.shape[0]:
+        raise ValueError(
+            "Orientation target frame count does not match loaded motion data: "
+            f"{orientation_targets.orientation_target_rotations.shape[0]} vs {human_joints.shape[0]}"
+        )
 
     # Get toe names from motion data config (depends only on data_format)
     toe_names = cfg.motion_data_config.toe_names
@@ -734,6 +781,7 @@ def main(cfg: RetargetingConfig) -> None:
         foot_sticking_sequences=foot_sticking_sequences,
         q_a_init=q_init,
         q_nominal_list=q_nominal,
+        orientation_targets=orientation_targets,
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
     )

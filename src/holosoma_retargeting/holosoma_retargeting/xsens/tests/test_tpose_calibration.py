@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import mujoco
 import numpy as np
+from scipy.spatial.transform import Rotation
 
+from holosoma_retargeting.config_types.data_type import MotionDataConfig
+from holosoma_retargeting.config_types.robot import RobotConfig
+from holosoma_retargeting.config_types.task import TaskConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Tpose
-from holosoma_retargeting.src.xsens_tpose_calibration import (
+from holosoma_retargeting.examples.robot_retarget import create_task_constants
+from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
+from holosoma_retargeting.xsens.tpose_calibration import (
     XsensTposeCalibrationConfig,
     align_and_scale_tpose_targets,
     axis_alignment_error_deg,
@@ -14,6 +20,12 @@ from holosoma_retargeting.src.xsens_tpose_calibration import (
     solve_xsens_tpose_calibration_from_data,
     symmetry_residual,
     visual_elbow_angle_deg,
+)
+from holosoma_retargeting.xsens.orientation_tracking import (
+    XSENS_AXIS_SPECS,
+    build_xsens_axis_calibration_metadata,
+    load_xsens_orientation_targets,
+    matrix_to_quat_wijk,
 )
 
 
@@ -96,6 +108,114 @@ def test_head_candidate_diagnostics_accept_and_reject() -> None:
     assert status.startswith("rejected")
 
 
+def test_axis_calibration_metadata_matches_tracking_matrix() -> None:
+    positions = _symmetric_tpose_positions()
+    quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(XSENS_BODY_SEGMENT_NAMES), 1))
+
+    metadata = build_xsens_axis_calibration_metadata(
+        tpose_positions_m=positions,
+        tpose_quaternions_wijk=quaternions,
+    )
+
+    assert metadata["axis_names"].tolist() == [spec.name for spec in XSENS_AXIS_SPECS]
+    assert metadata["axis_xsens_segment_names"].tolist() == [spec.xsens_segment for spec in XSENS_AXIS_SPECS]
+    assert metadata["axis_robot_start_link_names"].tolist() == [spec.robot_axis_start for spec in XSENS_AXIS_SPECS]
+    assert metadata["axis_robot_end_link_names"].tolist() == [spec.robot_axis_end for spec in XSENS_AXIS_SPECS]
+    np.testing.assert_allclose(np.linalg.norm(metadata["axis_local_tpose_xyz"], axis=1), 1.0)
+
+
+def test_orientation_targets_reconstruct_from_dynamic_orientation_and_saved_offsets(tmp_path) -> None:
+    angle = np.pi / 2.0
+    dynamic_rotation = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    offset_rotation = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            [0.0, 1.0, 0.0],
+        ]
+    )
+    calibration_path = tmp_path / "calibration.npz"
+    positions = _symmetric_tpose_positions()
+    quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(XSENS_BODY_SEGMENT_NAMES), 1))
+    axis_metadata = build_xsens_axis_calibration_metadata(
+        tpose_positions_m=positions,
+        tpose_quaternions_wijk=quaternions,
+    )
+    np.savez(
+        calibration_path,
+        active_orientation_mapping_names=np.asarray(["L5"], dtype=str),
+        robot_link_names=np.asarray(["torso_link"], dtype=str),
+        orientation_offsets_wijk=matrix_to_quat_wijk(offset_rotation.reshape(1, 3, 3)),
+        **axis_metadata,
+    )
+
+    motion_quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (2, len(XSENS_BODY_SEGMENT_NAMES), 1))
+    motion_quaternions[:, XSENS_BODY_SEGMENT_NAMES.index("L5")] = matrix_to_quat_wijk(
+        np.tile(dynamic_rotation, (2, 1, 1))
+    )
+
+    targets = load_xsens_orientation_targets(
+        calibration_path=calibration_path,
+        motion_quaternions_wijk=motion_quaternions,
+        segment_names=XSENS_BODY_SEGMENT_NAMES,
+    )
+
+    assert targets.orientation_names == ["L5"]
+    assert targets.orientation_robot_link_names == ["torso_link"]
+    np.testing.assert_allclose(targets.orientation_target_rotations[0, 0], dynamic_rotation @ offset_rotation, atol=1e-12)
+    assert targets.axis_target_vectors.shape == (2, len(XSENS_AXIS_SPECS), 3)
+
+
+def test_orientation_tracking_jacobians_match_finite_difference() -> None:
+    robot_urdf = "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.urdf"
+    constants = create_task_constants(
+        robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
+        motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
+        task_config=TaskConfig(),
+        task_type="robot_only",
+    )
+    retargeter = InteractionMeshRetargeter(
+        task_constants=constants,
+        object_urdf_path=None,
+        activate_foot_sticking=False,
+        activate_obj_non_penetration=False,
+    )
+    q = np.zeros(retargeter.nq, dtype=float)
+    q[3] = 1.0
+    retargeter.robot_data.qpos[:] = q
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+
+    joint_id = mujoco.mj_name2id(retargeter.robot_model, mujoco.mjtObj.mjOBJ_JOINT, "left_shoulder_roll_joint")
+    q_idx = int(retargeter.robot_model.jnt_qposadr[joint_id])
+    eps = 1e-6
+
+    J_rot, current_rotation = retargeter._frame_rotational_jacobian("left_rubber_hand_link")
+    q_eps = q.copy()
+    q_eps[q_idx] += eps
+    retargeter.robot_data.qpos[:] = q_eps
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    _, rotation_eps, _ = retargeter._frame_pose("left_rubber_hand_link")
+    rotvec_fd = Rotation.from_matrix(rotation_eps @ current_rotation.T).as_rotvec() / eps
+    np.testing.assert_allclose(J_rot[:, q_idx], rotvec_fd, atol=1e-4)
+
+    retargeter.robot_data.qpos[:] = q
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    axis, J_axis = retargeter._axis_jacobian("left_elbow_link", "left_rubber_hand_link")
+    q_eps = q.copy()
+    q_eps[q_idx] += eps
+    retargeter.robot_data.qpos[:] = q_eps
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    axis_eps, _ = retargeter._axis_jacobian("left_elbow_link", "left_rubber_hand_link")
+    axis_fd = (axis_eps - axis) / eps
+    np.testing.assert_allclose(J_axis[:, q_idx], axis_fd, atol=1e-4)
+
+
 def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     positions = _symmetric_tpose_positions()
     quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(XSENS_BODY_SEGMENT_NAMES), 1))
@@ -115,6 +235,8 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     assert result.qpos.shape == (1, 36)
     assert np.isfinite(result.qpos).all()
     assert result.head_candidate_status.startswith(("accepted", "rejected"))
+    assert result.axis_names == [spec.name for spec in XSENS_AXIS_SPECS]
+    assert result.axis_local_tpose_xyz.shape == (len(XSENS_AXIS_SPECS), 3)
 
     model = mujoco.MjModel.from_xml_path(
         "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
