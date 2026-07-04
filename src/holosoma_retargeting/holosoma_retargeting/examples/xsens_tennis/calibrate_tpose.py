@@ -1,4 +1,14 @@
-"""Calibrate a clean G1 T-pose from Xsens tennis HDF5 data."""
+"""
+Calibrate a clean G1 T-pose from Xsens tennis HDF5 data.
+
+Usage:
+    python examples/xsens_tennis/calibrate_tpose.py \
+    --data-path demo_data/xsens_tennis \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_02 \
+    --robot g1 \
+    --variant Tpose \
+    --save-path demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz
+"""
 
 from __future__ import annotations
 
