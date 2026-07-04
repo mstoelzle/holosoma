@@ -1,4 +1,4 @@
-"""Utilities for loading ActionNet-style Xsens HDF5 segment positions."""
+"""Utilities for loading ActionNet-style Xsens HDF5 segment data."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import numpy as np
 
 
 XSENS_DEVICE_NAME = "xsens-segments"
+XSENS_TPOSE_DEVICE_NAME = "xsens-segments-tpose"
 XSENS_POSITION_STREAM_NAMES = ("body_position_xyz_m", "position_cm")
 
 XSENS_BODY_SEGMENT_NAMES = [
@@ -47,6 +48,17 @@ class XsensHdf5Motion:
     positions_m: np.ndarray
     times_s: np.ndarray
     stream_name: str
+    segment_names: list[str]
+    source_indices: list[int]
+
+
+@dataclass(frozen=True)
+class XsensHdf5Tpose:
+    """Loaded Xsens static T-pose in retargeting coordinates."""
+
+    positions_m: np.ndarray
+    quaternions_wijk: np.ndarray
+    variant: str
     segment_names: list[str]
     source_indices: list[int]
 
@@ -124,6 +136,14 @@ def parse_segment_names(segment_names_attr: Any) -> list[str] | None:
     return [str(item) for item in parsed]
 
 
+def _segment_names_from_attrs(hdf5_obj: Any) -> list[str] | None:
+    headings = parse_data_headings(hdf5_obj.attrs.get("Data headings"))
+    segment_names = segment_names_from_headings(headings)
+    if segment_names is None:
+        segment_names = parse_segment_names(hdf5_obj.attrs.get("segment_names_body"))
+    return segment_names
+
+
 def transform_xsens_y_up_to_retargeting_z_up(positions: np.ndarray) -> np.ndarray:
     """Convert Xsens coordinates `[x, y_up, z]` to retargeting `[x, y, z_up]`."""
     return positions[..., [0, 2, 1]]
@@ -165,6 +185,40 @@ def _reshape_position_data(position_data: np.ndarray, segment_names: list[str] |
         return position_data.reshape(position_data.shape[0], len(segment_names), 3)
 
     raise ValueError(f"Unsupported Xsens position data shape: {position_data.shape}")
+
+
+def _reshape_static_position_data(position_data: np.ndarray, segment_names: list[str] | None) -> np.ndarray:
+    if position_data.ndim == 2 and position_data.shape[-1] == 3:
+        return position_data
+    if position_data.ndim == 3 and position_data.shape[-1] == 3 and position_data.shape[0] == 1:
+        return position_data[0]
+    if position_data.ndim == 1 and position_data.shape[0] % 3 == 0:
+        return position_data.reshape(-1, 3)
+
+    if segment_names is None:
+        raise ValueError(f"Unsupported Xsens static position data shape: {position_data.shape}")
+    expected_flat_width = len(segment_names) * 3
+    if position_data.ndim == 1 and position_data.shape[0] == expected_flat_width:
+        return position_data.reshape(len(segment_names), 3)
+
+    raise ValueError(f"Unsupported Xsens static position data shape: {position_data.shape}")
+
+
+def _reshape_quaternion_data(quaternion_data: np.ndarray, segment_names: list[str] | None) -> np.ndarray:
+    if quaternion_data.ndim == 2 and quaternion_data.shape[-1] == 4:
+        return quaternion_data
+    if quaternion_data.ndim == 3 and quaternion_data.shape[-1] == 4 and quaternion_data.shape[0] == 1:
+        return quaternion_data[0]
+    if quaternion_data.ndim == 1 and quaternion_data.shape[0] % 4 == 0:
+        return quaternion_data.reshape(-1, 4)
+
+    if segment_names is None:
+        raise ValueError(f"Unsupported Xsens quaternion data shape: {quaternion_data.shape}")
+    expected_flat_width = len(segment_names) * 4
+    if quaternion_data.ndim == 1 and quaternion_data.shape[0] == expected_flat_width:
+        return quaternion_data.reshape(len(segment_names), 4)
+
+    raise ValueError(f"Unsupported Xsens quaternion data shape: {quaternion_data.shape}")
 
 
 def _normalize_segment_name(name: str) -> str:
@@ -241,10 +295,7 @@ def load_xsens_hdf5_positions(
 
     with h5py.File(path, "r") as hdf5_file:
         stream_name, stream_group = _get_position_stream(hdf5_file)
-        headings = parse_data_headings(stream_group.attrs.get("Data headings"))
-        segment_names = segment_names_from_headings(headings)
-        if segment_names is None:
-            segment_names = parse_segment_names(stream_group.attrs.get("segment_names_body"))
+        segment_names = _segment_names_from_attrs(stream_group)
 
         positions = np.asarray(stream_group["data"], dtype=float)
         times_s = np.asarray(stream_group["time_s"], dtype=float).reshape(-1)
@@ -260,6 +311,70 @@ def load_xsens_hdf5_positions(
         positions_m=positions[sample_indices],
         times_s=times_s[sample_indices],
         stream_name=stream_name,
+        segment_names=selected_segment_names,
+        source_indices=source_indices,
+    )
+
+
+def load_xsens_hdf5_tpose(path: str | Path, variant: str = "Tpose") -> XsensHdf5Tpose:
+    """Load Xsens static T-pose body segment positions and orientations.
+
+    The ActionNet tennis files store T-pose data as direct datasets under
+    `xsens-segments-tpose`, not as time series. Quaternions are returned in the
+    source `w, i, j, k` order.
+    """
+    h5py = _import_h5py()
+    path = Path(path)
+    position_dataset_name = f"body_position_{variant}_xyz_m"
+    quaternion_dataset_name = f"body_orientation_{variant}_quaternion_wijk"
+
+    with h5py.File(path, "r") as hdf5_file:
+        if XSENS_TPOSE_DEVICE_NAME not in hdf5_file:
+            raise KeyError(f"No {XSENS_TPOSE_DEVICE_NAME} group found in the HDF5 file")
+
+        tpose_group = hdf5_file[XSENS_TPOSE_DEVICE_NAME]
+        if position_dataset_name not in tpose_group:
+            raise KeyError(f"No Xsens T-pose position dataset found: {position_dataset_name}")
+        if quaternion_dataset_name not in tpose_group:
+            raise KeyError(f"No Xsens T-pose quaternion dataset found: {quaternion_dataset_name}")
+
+        position_dataset = tpose_group[position_dataset_name]
+        quaternion_dataset = tpose_group[quaternion_dataset_name]
+        segment_names = _segment_names_from_attrs(position_dataset)
+        if segment_names is None:
+            segment_names = _segment_names_from_attrs(quaternion_dataset)
+        if segment_names is None:
+            segment_names = _segment_names_from_attrs(tpose_group)
+        if segment_names is None and XSENS_DEVICE_NAME in hdf5_file:
+            xsens_streams = hdf5_file[XSENS_DEVICE_NAME]
+            for stream_name in XSENS_POSITION_STREAM_NAMES:
+                if stream_name in xsens_streams:
+                    segment_names = _segment_names_from_attrs(xsens_streams[stream_name])
+                    if segment_names is not None:
+                        break
+
+        positions = np.asarray(position_dataset, dtype=float)
+        quaternions = np.asarray(quaternion_dataset, dtype=float)
+
+    positions = _reshape_static_position_data(positions, segment_names)
+    quaternions = _reshape_quaternion_data(quaternions, segment_names)
+
+    if positions.shape[0] != quaternions.shape[0]:
+        raise ValueError(
+            "Xsens T-pose position/quaternion segment counts differ: "
+            f"{positions.shape[0]} vs {quaternions.shape[0]}"
+        )
+
+    selected_segment_names, source_indices = _body_segment_indices(segment_names, positions.shape[0])
+    positions = positions[source_indices]
+    quaternions = quaternions[source_indices]
+    quat_norms = np.linalg.norm(quaternions, axis=1, keepdims=True)
+    quaternions = quaternions / np.maximum(quat_norms, 1e-12)
+
+    return XsensHdf5Tpose(
+        positions_m=positions,
+        quaternions_wijk=quaternions,
+        variant=variant,
         segment_names=selected_segment_names,
         source_indices=source_indices,
     )

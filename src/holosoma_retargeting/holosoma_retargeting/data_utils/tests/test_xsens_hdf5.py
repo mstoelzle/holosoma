@@ -7,6 +7,7 @@ from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
     load_xsens_hdf5_positions,
+    load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
 
@@ -132,3 +133,43 @@ def test_resolve_xsens_hdf5_path_accepts_task_stems_and_explicit_files(tmp_path)
 
     assert resolve_xsens_hdf5_path(tmp_path, "tennis_motion") == hdf5_path
     assert resolve_xsens_hdf5_path(tmp_path, "tennis_motion.hdf5") == hdf5_path
+
+
+def test_tpose_loader_selects_body_segments_and_ignores_extra_segment(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_tpose.hdf5"
+    segment_names = XSENS_BODY_SEGMENT_NAMES[:5] + ["RightHandSword"] + XSENS_BODY_SEGMENT_NAMES[5:]
+    positions_m = np.zeros((len(segment_names), 3), dtype=float)
+    quaternions_wijk = np.tile(np.array([2.0, 0.0, 0.0, 0.0]), (len(segment_names), 1))
+    head_source_idx = segment_names.index("Head")
+    positions_m[head_source_idx] = [1.0, 2.0, 3.0]
+    positions_m[segment_names.index("RightHandSword")] = [999.0, 999.0, 999.0]
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        group = hdf5_file.create_group("xsens-segments-tpose")
+        group.attrs["segment_names_body"] = str(segment_names)
+        group.create_dataset("body_position_Tpose_xyz_m", data=positions_m)
+        group.create_dataset("body_orientation_Tpose_quaternion_wijk", data=quaternions_wijk)
+
+    tpose = load_xsens_hdf5_tpose(hdf5_path)
+
+    assert tpose.variant == "Tpose"
+    assert tpose.positions_m.shape == (len(XSENS_BODY_SEGMENT_NAMES), 3)
+    assert tpose.quaternions_wijk.shape == (len(XSENS_BODY_SEGMENT_NAMES), 4)
+    assert tpose.segment_names == XSENS_BODY_SEGMENT_NAMES
+    assert tpose.source_indices[XSENS_BODY_SEGMENT_NAMES.index("Head")] == head_source_idx
+    np.testing.assert_allclose(tpose.positions_m[XSENS_BODY_SEGMENT_NAMES.index("Head")], [1.0, 2.0, 3.0])
+    assert not np.any(tpose.positions_m == 999.0)
+    np.testing.assert_allclose(np.linalg.norm(tpose.quaternions_wijk, axis=1), 1.0)
+
+
+def test_tpose_loader_errors_on_missing_variant(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_tpose.hdf5"
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        hdf5_file.create_group("xsens-segments-tpose")
+
+    try:
+        load_xsens_hdf5_tpose(hdf5_path, variant="Tpose")
+    except KeyError as exc:
+        assert "body_position_Tpose_xyz_m" in str(exc)
+    else:
+        raise AssertionError("Expected a KeyError for missing T-pose datasets")
