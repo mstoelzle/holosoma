@@ -88,6 +88,31 @@ python examples/parallel_robot_retarget.py \
 The Xsens tennis files are local demo inputs; this code path works when `.hdf5`/`.h5` files are present in
 `demo_data/xsens_tennis`, but the retargeting code itself does not require those large files to be tracked by Git.
 
+### Export a calibrated OpenUSD kinematic model
+
+Install the optional OpenUSD bindings, then export one independent subject model for one recording or every HDF5 in
+a directory:
+
+```bash
+pip install -e '.[usd]'
+
+python examples/xsens_tennis/export_xsens_usd.py \
+    --hdf5-path demo_data/xsens_tennis/recording.hdf5
+
+python examples/xsens_tennis/export_xsens_usd.py \
+    --input-dir demo_data/xsens_tennis \
+    --output-dir demo_data/xsens_tennis/usd_models
+```
+
+The output is `<recording>_xsens_model.usda`. It contains a floating pelvis, calibrated rigid segment transforms,
+unrestricted spherical joints, local anatomical landmarks, and render-only avatar geometry. The tracked prop is
+exposed canonically as `TennisRacket`; historical Xsens source identifiers are retained only as `xsens:*` metadata.
+Motion remains in the HDF5 file.
+
+The implementation is reusable by layer: `data_utils.xsens_hdf5` reads calibration data,
+`xsens.kinematic_model` constructs a backend-independent tree, `kinematics` provides generic model/FK operations,
+and `usd` reads, writes, validates, or replaces a kinematic subtree in an existing stage.
+
 ### Calibrate and visualize the retargeted G1 T-pose
 
 The calibration follows the Xsens T-pose convention: arms and hands are horizontal, with both thumbs pointing
@@ -96,16 +121,16 @@ model is used deliberately: its rubber-hand fingers are fixed and remain curled,
 substituting a different end-effector model.
 
 ```bash
-python examples/xsens_tennis/calibrate_tpose.py \\
-    --data-path demo_data/xsens_tennis \\
-    --task-name 2026-06-14_tennis_S02_xsens_myo_data_02 \\
-    --robot g1 \\
-    --variant Tpose \\
+python examples/xsens_tennis/calibrate_tpose.py \
+    --data-path demo_data/xsens_tennis \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_02 \
+    --robot g1 \
+    --variant Tpose \
     --save-path demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz
 
-python viser_player.py \\
-    --robot-urdf models/g1/g1_29dof.urdf \\
-    --qpos-npz demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz \\
+python viser_player.py \
+    --robot-urdf models/g1/g1_29dof.urdf \
+    --qpos-npz demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz \
     --no-assume-object-in-qpos
 ```
 
