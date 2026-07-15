@@ -9,7 +9,6 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
     XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX,
     load_xsens_hdf5_motion,
-    load_xsens_hdf5_positions,
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
@@ -32,6 +31,22 @@ def _write_stream(
     stream_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
     if segment_names is not None:
         stream_group.attrs["Data headings"] = str(_headings(segment_names))
+
+
+def _write_identity_orientations(
+    hdf5_file: h5py.File,
+    times_s: np.ndarray,
+    segment_names: list[str] | None = None,
+) -> None:
+    n_segments = len(XSENS_BODY_SEGMENT_NAMES) if segment_names is None else len(segment_names)
+    quaternions_wijk = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(times_s), n_segments, 1))
+    _write_stream(
+        hdf5_file,
+        "body_orientation_quaternion_wijk",
+        quaternions_wijk,
+        times_s,
+        segment_names,
+    )
 
 
 def test_motion_data_config_registers_xsens_for_g1() -> None:
@@ -61,11 +76,14 @@ def test_loader_prefers_meter_stream_and_uses_headings_to_ignore_extra_segments(
     with h5py.File(hdf5_path, "w") as hdf5_file:
         _write_stream(hdf5_file, "position_cm", ignored_positions_cm, times_s, XSENS_BODY_SEGMENT_NAMES)
         _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, segment_names)
+        _write_identity_orientations(hdf5_file, times_s, segment_names)
 
-    motion = load_xsens_hdf5_positions(hdf5_path, target_fps=30.0)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
 
     assert motion.stream_name == "body_position_xyz_m"
     assert motion.positions_m.shape == (3, len(XSENS_BODY_SEGMENT_NAMES), 3)
+    assert motion.quaternions_wijk.shape == (3, len(XSENS_BODY_SEGMENT_NAMES), 4)
+    assert motion.orientation_stream_name == "body_orientation_quaternion_wijk"
     assert motion.times_s.tolist() == [times_s[0], times_s[2], times_s[4]]
     assert motion.segment_names == XSENS_BODY_SEGMENT_NAMES
 
@@ -89,8 +107,9 @@ def test_loader_uses_segment_names_body_metadata_and_drops_sword_segment(tmp_pat
         stream_group.create_dataset("data", data=positions_m)
         stream_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
         stream_group.attrs["segment_names_body"] = str(metadata_segment_names)
+        _write_identity_orientations(hdf5_file, times_s, metadata_segment_names)
 
-    motion = load_xsens_hdf5_positions(hdf5_path, target_fps=30.0)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
 
     left_toe_body_idx = XSENS_BODY_SEGMENT_NAMES.index("Left Toe")
     assert motion.positions_m.shape == (3, len(XSENS_BODY_SEGMENT_NAMES), 3)
@@ -107,8 +126,9 @@ def test_loader_falls_back_to_cm_stream_without_headings(tmp_path) -> None:
 
     with h5py.File(hdf5_path, "w") as hdf5_file:
         _write_stream(hdf5_file, "position_cm", positions_cm, times_s)
+        _write_identity_orientations(hdf5_file, times_s)
 
-    motion = load_xsens_hdf5_positions(hdf5_path, target_fps=30.0)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
 
     assert motion.stream_name == "position_cm"
     assert motion.source_indices == list(range(len(XSENS_BODY_SEGMENT_NAMES)))
@@ -124,8 +144,9 @@ def test_loader_applies_frame_window_after_time_sampling(tmp_path) -> None:
 
     with h5py.File(hdf5_path, "w") as hdf5_file:
         _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
+        _write_identity_orientations(hdf5_file, times_s, XSENS_BODY_SEGMENT_NAMES)
 
-    motion = load_xsens_hdf5_positions(hdf5_path, target_fps=30.0, frame_start=1, max_frames=2)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, frame_start=1, max_frames=2)
 
     assert motion.times_s.tolist() == [times_s[2], times_s[4]]
     np.testing.assert_allclose(motion.positions_m[:, 0, 0], [2.0, 4.0])
@@ -151,9 +172,8 @@ def test_motion_loader_reads_sampled_dynamic_orientations_and_ignores_extra_segm
         orientation_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
         orientation_group.attrs["segment_names_body"] = str(segment_names)
 
-    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
 
-    assert motion.quaternions_wijk is not None
     assert motion.orientation_stream_name == "body_orientation_quaternion_wijk"
     assert motion.quaternions_wijk.shape == (3, len(XSENS_BODY_SEGMENT_NAMES), 4)
     left_hand_body_idx = XSENS_BODY_SEGMENT_NAMES.index("Left Hand")
@@ -179,16 +199,15 @@ def test_motion_loader_converts_position_cm_flat_orientations_to_retargeting_fra
         orientation_group.create_dataset("data", data=quaternions_wijk.reshape(1, -1))
         orientation_group.create_dataset("time_s", data=times_s.reshape(-1, 1))
 
-    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+    motion = load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
 
-    assert motion.quaternions_wijk is not None
     np.testing.assert_allclose(motion.positions_m[0, 0], [1.0, 3.0, 2.0])
     expected_rotation = XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX @ rot_xsens @ XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX.T
     actual_rotation = quat_wijk_to_matrix(motion.quaternions_wijk[0, 0])
     np.testing.assert_allclose(actual_rotation, expected_rotation, atol=1e-12)
 
 
-def test_motion_loader_errors_when_orientations_requested_but_missing(tmp_path) -> None:
+def test_motion_loader_requires_orientations(tmp_path) -> None:
     hdf5_path = tmp_path / "xsens_no_orientation.hdf5"
     times_s = np.arange(3, dtype=float) / 30.0
     positions_m = np.zeros((3, len(XSENS_BODY_SEGMENT_NAMES), 3), dtype=float)
@@ -197,7 +216,7 @@ def test_motion_loader_errors_when_orientations_requested_but_missing(tmp_path) 
         _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
 
     try:
-        load_xsens_hdf5_motion(hdf5_path, target_fps=30.0, include_orientations=True)
+        load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
     except KeyError as exc:
         assert "body_orientation_quaternion_wijk" in str(exc)
     else:

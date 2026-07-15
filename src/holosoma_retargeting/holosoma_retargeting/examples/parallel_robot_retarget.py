@@ -203,10 +203,7 @@ def process_single_task(args):
             target_fps=target_fps,
             frame_start=motion_data_config.frame_start,
             max_frames=motion_data_config.max_frames,
-            include_orientations=True,
         )
-        if xsens_motion.quaternions_wijk is None:
-            raise RuntimeError("Xsens orientation tracking requested but no quaternions were loaded")
         orientation_targets = load_xsens_orientation_targets(
             calibration_path=retargeter.orientation.calibration_path,
             motion_quaternions_wijk=xsens_motion.quaternions_wijk,

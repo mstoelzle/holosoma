@@ -29,7 +29,6 @@ from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
     load_xsens_hdf5_motion,
-    load_xsens_hdf5_positions,
     resolve_xsens_hdf5_path,
 )
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
@@ -256,7 +255,7 @@ def load_motion_data(
             target_fps = motion_data_config.target_fps if motion_data_config.target_fps is not None else None
             if target_fps is None:
                 target_fps = RETARGETING_OUTPUT_FPS
-            xsens_motion = load_xsens_hdf5_positions(
+            xsens_motion = load_xsens_hdf5_motion(
                 hdf5_path,
                 target_fps=target_fps,
                 frame_start=motion_data_config.frame_start,
@@ -535,10 +534,7 @@ def load_orientation_targets_for_retargeting(
         target_fps=target_fps,
         frame_start=cfg.motion_data_config.frame_start,
         max_frames=cfg.motion_data_config.max_frames,
-        include_orientations=True,
     )
-    if xsens_motion.quaternions_wijk is None:
-        raise RuntimeError("Xsens orientation tracking requested but no quaternions were loaded")
     return load_xsens_orientation_targets(
         calibration_path=orientation_cfg.calibration_path,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
