@@ -37,6 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["mypy", "ruff", "pytest"]
+usd = ["usd-core"]
 
 [tool.setuptools.packages.find]
 where = ["."]

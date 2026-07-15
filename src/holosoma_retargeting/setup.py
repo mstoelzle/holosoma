@@ -30,4 +30,5 @@ setup(
         "tyro",
         "h5py",
     ],
+    extras_require={"usd": ["usd-core"]},
 )
