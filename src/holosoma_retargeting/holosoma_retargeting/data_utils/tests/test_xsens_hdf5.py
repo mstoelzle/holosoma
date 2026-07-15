@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import h5py
 import numpy as np
-from scipy.spatial.transform import Rotation
-
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
     XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX,
+    inspect_xsens_hdf5,
+    load_xsens_hdf5_calibration,
     load_xsens_hdf5_motion,
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
 from holosoma_retargeting.xsens.orientation_tracking import quat_wijk_to_matrix
+from scipy.spatial.transform import Rotation
 
 
 def _headings(segment_names: list[str]) -> list[str]:
@@ -269,3 +272,52 @@ def test_tpose_loader_errors_on_missing_variant(tmp_path) -> None:
         assert "body_position_Tpose_xyz_m" in str(exc)
     else:
         raise AssertionError("Expected a KeyError for missing T-pose datasets")
+
+
+def test_calibration_loader_preserves_complete_source_schema(tmp_path) -> None:
+    path = tmp_path / "calibration.hdf5"
+    segment_names = ["Pelvis", "RightHandSword"]
+    joint_names = ["RightHandSwordOrigin"]
+    landmarks = OrderedDict(
+        [
+            ("Pelvis", OrderedDict([("pHipOrigin", [0.0, 0.0, 0.0])])),
+            ("RightHandSword", OrderedDict()),
+        ]
+    )
+    positions = np.array([[0.0, 0.0, 1.0], [0.1, -0.2, 1.0]])
+    quaternions = np.tile(np.array([2.0, 0.0, 0.0, 0.0]), (2, 1))
+
+    with h5py.File(path, "w") as hdf5_file:
+        stream = hdf5_file.require_group("xsens-segments").create_group("body_position_xyz_m")
+        stream.attrs["segment_names_body"] = repr(segment_names)
+        stream.attrs["segment_mesh_points_body_xyz_cm"] = repr(landmarks)
+        stream.attrs["mvn_version"] = "test-mvn"
+        stream.attrs["mvnx_version"] = "4"
+        poses = hdf5_file.create_group("xsens-segments-tpose")
+        for variant in ("Tpose", "TposeISB", "identity"):
+            poses.create_dataset(f"body_position_{variant}_xyz_m", data=positions)
+            poses.create_dataset(f"body_orientation_{variant}_quaternion_wijk", data=quaternions)
+        joints = hdf5_file.create_group("xsens-joints")
+        for stream_name in (
+            "body_joint_angles_eulerZXY_xyz_rad",
+            "body_joint_angles_eulerXZY_xyz_rad",
+        ):
+            joint_stream = joints.create_group(stream_name)
+            joint_stream.attrs["joint_names_body"] = repr(joint_names)
+            joint_stream.attrs["joint_rotation_order_body"] = repr(
+                [("RightHandSwordOrigin", ("x", "y", "z"))]
+            )
+
+    inventory = inspect_xsens_hdf5(path)
+    calibration = load_xsens_hdf5_calibration(path)
+
+    assert inventory.segment_names == tuple(segment_names)
+    assert inventory.joint_names == tuple(joint_names)
+    assert inventory.pose_variants == ("Tpose", "TposeISB", "identity")
+    assert inventory.has_landmarks
+    assert calibration.segment_names[-1] == "RightHandSword"
+    assert calibration.joint_names[-1] == "RightHandSwordOrigin"
+    assert calibration.tpose_isb is not None
+    assert calibration.identity_pose is not None
+    np.testing.assert_allclose(np.linalg.norm(calibration.tpose.quaternions_wijk, axis=1), 1.0)
+    assert calibration.joint_rotation_metadata["RightHandSwordOrigin"].components == ("x", "y", "z")

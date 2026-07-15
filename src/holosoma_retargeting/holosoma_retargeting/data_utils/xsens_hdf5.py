@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import ast
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
-
 
 XSENS_DEVICE_NAME = "xsens-segments"
 XSENS_TPOSE_DEVICE_NAME = "xsens-segments-tpose"
 XSENS_POSITION_STREAM_NAMES = ("body_position_xyz_m", "position_cm")
 XSENS_ORIENTATION_STREAM_NAME = "body_orientation_quaternion_wijk"
+XSENS_JOINT_DEVICE_NAME = "xsens-joints"
+XSENS_JOINT_STREAM_NAMES = (
+    "body_joint_angles_eulerZXY_xyz_rad",
+    "body_joint_angles_eulerXZY_xyz_rad",
+)
 XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX = np.array(
     [
         [1.0, 0.0, 0.0],
@@ -75,9 +80,57 @@ class XsensHdf5Tpose:
     source_indices: list[int]
 
 
+@dataclass(frozen=True)
+class SegmentPoseSet:
+    """Static world poses for every segment in one Xsens reference pose."""
+
+    positions_m: np.ndarray
+    quaternions_wijk: np.ndarray
+    variant: str
+
+
+@dataclass(frozen=True)
+class JointRotationMetadata:
+    """Semantic Xsens rotation channels for one articulated joint."""
+
+    joint_name: str
+    components: tuple[str, ...]
+    available_euler_streams: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class XsensHdf5Inventory:
+    """Lightweight description of the Xsens content available in an HDF5 file."""
+
+    path: Path
+    segment_names: tuple[str, ...]
+    joint_names: tuple[str, ...]
+    pose_variants: tuple[str, ...]
+    joint_stream_names: tuple[str, ...]
+    has_landmarks: bool
+
+
+@dataclass(frozen=True)
+class XsensHdf5Calibration:
+    """Complete subject calibration embedded in one Xsens HDF5 recording."""
+
+    source_path: Path
+    source_stream_name: str
+    segment_names: tuple[str, ...]
+    joint_names: tuple[str, ...]
+    tpose: SegmentPoseSet
+    tpose_isb: SegmentPoseSet | None
+    identity_pose: SegmentPoseSet | None
+    landmarks_m: Mapping[str, Mapping[str, np.ndarray]]
+    joint_rotation_metadata: Mapping[str, JointRotationMetadata]
+    joint_stream_names: tuple[str, ...]
+    mvn_version: str | None
+    mvnx_version: str | None
+
+
 def _import_h5py():
     try:
-        import h5py  # type: ignore[import-not-found]
+        import h5py  # type: ignore[import-not-found]  # noqa: PLC0415
     except ImportError as exc:
         raise ImportError("Loading Xsens HDF5 files requires the optional dependency 'h5py'.") from exc
     return h5py
@@ -87,6 +140,58 @@ def _decode_attr(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8")
     return value
+
+
+def _parse_ordered_dict(value: Any) -> OrderedDict[str, OrderedDict[str, list[float]]]:
+    """Parse Xsens's stringified ``OrderedDict`` landmark metadata safely."""
+
+    value = _decode_attr(value)
+    if not isinstance(value, str):
+        raise TypeError("segment_mesh_points_body_xyz_cm must be stored as text")
+
+    expression = ast.parse(value, mode="eval")
+    allowed_nodes = (
+        ast.Expression,
+        ast.Call,
+        ast.Name,
+        ast.Load,
+        ast.List,
+        ast.Tuple,
+        ast.Constant,
+        ast.UnaryOp,
+        ast.USub,
+    )
+    for node in ast.walk(expression):
+        if not isinstance(node, allowed_nodes):
+            raise ValueError(f"Unsupported syntax in Xsens landmark metadata: {type(node).__name__}")
+        if isinstance(node, ast.Name) and node.id != "OrderedDict":
+            raise ValueError(f"Unsupported name in Xsens landmark metadata: {node.id}")
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id != "OrderedDict" or node.keywords:
+                raise ValueError("Only OrderedDict(...) calls are allowed in Xsens landmark metadata")
+
+    parsed = eval(  # noqa: S307 - the AST is strictly whitelisted above.
+        compile(expression, filename="<xsens-landmarks>", mode="eval"),
+        {"__builtins__": {}, "OrderedDict": OrderedDict},
+        {},
+    )
+    if not isinstance(parsed, OrderedDict):
+        raise ValueError("Xsens landmark metadata did not decode to an OrderedDict")
+    return parsed
+
+
+def _parse_string_sequence(value: Any, *, attribute_name: str) -> tuple[str, ...]:
+    value = _decode_attr(value)
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value)
+    if not isinstance(value, str):
+        raise TypeError(f"{attribute_name} must be stored as text or a sequence")
+    parsed = ast.literal_eval(value)
+    if not isinstance(parsed, (list, tuple)):
+        raise ValueError(f"{attribute_name} must decode to a sequence")
+    return tuple(str(item) for item in parsed)
 
 
 def parse_data_headings(data_headings_attr: Any) -> list[str] | None:
@@ -456,6 +561,165 @@ def load_xsens_hdf5_tpose(path: str | Path, variant: str = "Tpose") -> XsensHdf5
         variant=variant,
         segment_names=selected_segment_names,
         source_indices=source_indices,
+    )
+
+
+def _calibration_position_stream(hdf5_file: Any) -> tuple[str, Any]:
+    if XSENS_DEVICE_NAME not in hdf5_file:
+        raise KeyError(f"No {XSENS_DEVICE_NAME} group found in the HDF5 file")
+    streams = hdf5_file[XSENS_DEVICE_NAME]
+    for stream_name in XSENS_POSITION_STREAM_NAMES:
+        if stream_name in streams:
+            return stream_name, streams[stream_name]
+    expected = ", ".join(XSENS_POSITION_STREAM_NAMES)
+    raise KeyError(f"No Xsens segment metadata stream found. Expected one of: {expected}")
+
+
+def _load_pose_variant(tpose_group: Any, variant: str, n_segments: int) -> SegmentPoseSet | None:
+    position_name = f"body_position_{variant}_xyz_m"
+    quaternion_name = f"body_orientation_{variant}_quaternion_wijk"
+    has_position = position_name in tpose_group
+    has_orientation = quaternion_name in tpose_group
+    if not has_position and not has_orientation:
+        return None
+    if not has_position or not has_orientation:
+        missing = quaternion_name if has_position else position_name
+        raise KeyError(f"Xsens reference pose '{variant}' is incomplete; missing {missing}")
+
+    positions = _reshape_static_position_data(np.asarray(tpose_group[position_name], dtype=float), None)
+    quaternions = _reshape_quaternion_data(np.asarray(tpose_group[quaternion_name], dtype=float), None)
+    if positions.shape != (n_segments, 3):
+        raise ValueError(f"Unexpected {variant} position shape: {positions.shape}; expected {(n_segments, 3)}")
+    if quaternions.shape != (n_segments, 4):
+        raise ValueError(f"Unexpected {variant} quaternion shape: {quaternions.shape}; expected {(n_segments, 4)}")
+    if not np.isfinite(positions).all() or not np.isfinite(quaternions).all():
+        raise ValueError(f"Xsens reference pose '{variant}' contains non-finite values")
+    norms = np.linalg.norm(quaternions, axis=1)
+    if np.any(norms <= 1e-12):
+        raise ValueError(f"Xsens reference pose '{variant}' contains a zero-length quaternion")
+    return SegmentPoseSet(
+        positions_m=positions,
+        quaternions_wijk=_normalize_quaternions_wijk(quaternions),
+        variant=variant,
+    )
+
+
+def _joint_metadata(hdf5_file: Any) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, JointRotationMetadata]]:
+    if XSENS_JOINT_DEVICE_NAME not in hdf5_file:
+        raise KeyError(f"No {XSENS_JOINT_DEVICE_NAME} group found in the HDF5 file")
+    joint_group = hdf5_file[XSENS_JOINT_DEVICE_NAME]
+    available_streams = tuple(name for name in XSENS_JOINT_STREAM_NAMES if name in joint_group)
+    if not available_streams:
+        expected = ", ".join(XSENS_JOINT_STREAM_NAMES)
+        raise KeyError(f"No Xsens body joint-angle stream found. Expected one of: {expected}")
+
+    primary = joint_group[available_streams[0]]
+    joint_names = _parse_string_sequence(primary.attrs.get("joint_names_body"), attribute_name="joint_names_body")
+    rotation_order_value = primary.attrs.get("joint_rotation_order_body")
+    rotation_components: dict[str, tuple[str, ...]] = {}
+    if rotation_order_value is not None:
+        parsed = ast.literal_eval(str(_decode_attr(rotation_order_value)))
+        if not isinstance(parsed, (list, tuple)):
+            raise ValueError("joint_rotation_order_body must decode to a sequence")
+        for item in parsed:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise ValueError("Each joint_rotation_order_body entry must contain a joint and its components")
+            rotation_components[str(item[0])] = tuple(str(component) for component in item[1])
+
+    metadata = {
+        name: JointRotationMetadata(
+            joint_name=name,
+            components=rotation_components.get(name, ()),
+            available_euler_streams=available_streams,
+        )
+        for name in joint_names
+    }
+    return joint_names, available_streams, metadata
+
+
+def inspect_xsens_hdf5(path: str | Path) -> XsensHdf5Inventory:
+    """Return a lightweight inventory without loading motion arrays."""
+
+    h5py = _import_h5py()
+    path = Path(path)
+    with h5py.File(path, "r") as hdf5_file:
+        _, stream = _calibration_position_stream(hdf5_file)
+        segment_names = _segment_names_from_attrs(stream)
+        if segment_names is None:
+            raise KeyError("Xsens segment stream is missing segment_names_body/Data headings metadata")
+        joint_names, joint_stream_names, _ = _joint_metadata(hdf5_file)
+        tpose_group = hdf5_file.get(XSENS_TPOSE_DEVICE_NAME)
+        if tpose_group is None:
+            pose_variants: tuple[str, ...] = ()
+        else:
+            pose_variants = tuple(
+                variant
+                for variant in ("Tpose", "TposeISB", "identity")
+                if f"body_position_{variant}_xyz_m" in tpose_group
+                and f"body_orientation_{variant}_quaternion_wijk" in tpose_group
+            )
+        return XsensHdf5Inventory(
+            path=path,
+            segment_names=tuple(segment_names),
+            joint_names=joint_names,
+            pose_variants=pose_variants,
+            joint_stream_names=joint_stream_names,
+            has_landmarks="segment_mesh_points_body_xyz_cm" in stream.attrs,
+        )
+
+
+def load_xsens_hdf5_calibration(path: str | Path) -> XsensHdf5Calibration:
+    """Load the complete subject-specific kinematic calibration from one recording."""
+
+    h5py = _import_h5py()
+    path = Path(path)
+    with h5py.File(path, "r") as hdf5_file:
+        stream_name, stream = _calibration_position_stream(hdf5_file)
+        segment_names_list = _segment_names_from_attrs(stream)
+        if segment_names_list is None:
+            raise KeyError("Xsens segment stream is missing segment_names_body/Data headings metadata")
+        segment_names = tuple(segment_names_list)
+
+        landmark_value = stream.attrs.get("segment_mesh_points_body_xyz_cm")
+        if landmark_value is None:
+            raise KeyError("Xsens segment stream is missing segment_mesh_points_body_xyz_cm metadata")
+        raw_landmarks = _parse_ordered_dict(landmark_value)
+        landmarks_m: dict[str, dict[str, np.ndarray]] = {
+            str(segment): {
+                str(name): np.asarray(value, dtype=float) * 0.01 for name, value in segment_landmarks.items()
+            }
+            for segment, segment_landmarks in raw_landmarks.items()
+        }
+        missing_landmarks = [segment for segment in segment_names if segment not in landmarks_m]
+        if missing_landmarks:
+            raise ValueError(f"Xsens landmark metadata is missing segments: {missing_landmarks}")
+
+        if XSENS_TPOSE_DEVICE_NAME not in hdf5_file:
+            raise KeyError(f"No {XSENS_TPOSE_DEVICE_NAME} group found in the HDF5 file")
+        tpose_group = hdf5_file[XSENS_TPOSE_DEVICE_NAME]
+        tpose = _load_pose_variant(tpose_group, "Tpose", len(segment_names))
+        if tpose is None:
+            raise KeyError("Xsens calibration is missing the required Tpose position/orientation datasets")
+        tpose_isb = _load_pose_variant(tpose_group, "TposeISB", len(segment_names))
+        identity_pose = _load_pose_variant(tpose_group, "identity", len(segment_names))
+
+        joint_names, joint_stream_names, joint_rotation_metadata = _joint_metadata(hdf5_file)
+        mvn_version = stream.attrs.get("mvn_version")
+        mvnx_version = stream.attrs.get("mvnx_version")
+
+    return XsensHdf5Calibration(
+        source_path=path,
+        source_stream_name=stream_name,
+        segment_names=segment_names,
+        joint_names=joint_names,
+        tpose=tpose,
+        tpose_isb=tpose_isb,
+        identity_pose=identity_pose,
+        landmarks_m=landmarks_m,
+        joint_rotation_metadata=joint_rotation_metadata,
+        joint_stream_names=joint_stream_names,
+        mvn_version=None if mvn_version is None else str(_decode_attr(mvn_version)),
+        mvnx_version=None if mvnx_version is None else str(_decode_attr(mvnx_version)),
     )
 
 
