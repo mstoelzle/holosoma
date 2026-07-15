@@ -11,6 +11,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES,
 from holosoma_retargeting.examples.robot_retarget import create_task_constants
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 from holosoma_retargeting.xsens.tpose_calibration import (
+    CALIBRATION_POSITION_MAPPING,
     XsensTposeCalibrationConfig,
     align_and_scale_tpose_targets,
     axis_alignment_error_deg,
@@ -19,7 +20,7 @@ from holosoma_retargeting.xsens.tpose_calibration import (
     limb_axis_error_deg,
     solve_xsens_tpose_calibration_from_data,
     symmetry_residual,
-    visual_elbow_angle_deg,
+    elbow_bend_angle_deg,
 )
 from holosoma_retargeting.xsens.orientation_tracking import (
     XSENS_AXIS_SPECS,
@@ -92,7 +93,7 @@ def test_head_candidate_diagnostics_accept_and_reject() -> None:
     cfg = XsensTposeCalibrationConfig(verbose=0)
 
     accepted, status = evaluate_head_candidate(
-        head_position_error_m=0.05,
+        head_axis_error_deg=5.0,
         head_orientation_offset_wijk=np.array([1.0, 0.0, 0.0, 0.0]),
         config=cfg,
     )
@@ -100,7 +101,7 @@ def test_head_candidate_diagnostics_accept_and_reject() -> None:
     assert status.startswith("accepted")
 
     rejected, status = evaluate_head_candidate(
-        head_position_error_m=0.2,
+        head_axis_error_deg=20.0,
         head_orientation_offset_wijk=np.array([1.0, 0.0, 0.0, 0.0]),
         config=cfg,
     )
@@ -237,6 +238,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     assert result.head_candidate_status.startswith(("accepted", "rejected"))
     assert result.axis_names == [spec.name for spec in XSENS_AXIS_SPECS]
     assert result.axis_local_tpose_xyz.shape == (len(XSENS_AXIS_SPECS), 3)
+    assert result.position_offsets_robot_minus_xsens_m.shape == (len(CALIBRATION_POSITION_MAPPING), 3)
 
     model = mujoco.MjModel.from_xml_path(
         "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
@@ -253,15 +255,79 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     right_knee = result.qpos[0, 16]
     assert abs(left_knee) < 0.5
     assert abs(right_knee) < 0.5
-    for wrist_qpos_idx in (26, 27, 28, 33, 34, 35):
-        assert abs(result.qpos[0, wrist_qpos_idx]) < 0.35
-
+    forward = np.array([1.0, 0.0, 0.0])
     up = np.array([0.0, 0.0, 1.0])
+    neutral_data = mujoco.MjData(model)
+    neutral_data.qpos[3] = 1.0
+    mujoco.mj_forward(model, neutral_data)
+    neutral_hip_positions = [
+        neutral_data.xanchor[
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_hip_pitch_joint")
+        ]
+        for side in ("left", "right")
+    ]
+    nominal_half_hip_width = 0.5 * np.linalg.norm(neutral_hip_positions[0] - neutral_hip_positions[1])
     for side in ("left", "right"):
-        shoulder = data.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_shoulder_roll_link")]
-        elbow = data.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_elbow_link")]
-        hand = data.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_rubber_hand_link")]
-        assert visual_elbow_angle_deg(shoulder, elbow, hand) < 12.0
+        joint_positions = []
+        for joint_name in ("shoulder_yaw_joint", "elbow_joint", "wrist_roll_joint"):
+            joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_{joint_name}")
+            joint_positions.append(data.xanchor[joint_id])
+        assert elbow_bend_angle_deg(*joint_positions) < 2.0
+        expected_arm_axis = np.array([0.0, 1.0 if side == "left" else -1.0, 0.0])
+        assert axis_alignment_error_deg(joint_positions[-1] - joint_positions[0], expected_arm_axis) < 2.0
         hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"{side}_rubber_hand_link")
-        hand_vertical = data.xmat[hand_id].reshape(3, 3)[:, 2]
-        assert axis_alignment_error_deg(hand_vertical, up) < 8.0
+        hand_rotation = data.xmat[hand_id].reshape(3, 3)
+        thumb_axis = hand_rotation[:, 2]
+        palm_normal = hand_rotation[:, 1]
+        expected_palm_normal = up if side == "left" else -up
+        assert axis_alignment_error_deg(thumb_axis, forward) < 8.0
+        assert axis_alignment_error_deg(palm_normal, expected_palm_normal) < 8.0
+
+        contact_positions = []
+        contact_radii = []
+        for index in range(1, 6):
+            geom_name = f"{side}_ankle_roll_sphere_{index}_link"
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            contact_positions.append(data.geom_xpos[geom_id])
+            contact_radii.append(model.geom_size[geom_id, 0])
+        contact_positions = np.asarray(contact_positions)
+        contact_bottom_heights = contact_positions[:, 2] - np.asarray(contact_radii)
+        heel_center = np.mean(contact_positions[:2], axis=0)
+        toe_center = np.mean(contact_positions[2:], axis=0)
+        positive_lateral = np.mean(contact_positions[[0, 2]], axis=0)
+        negative_lateral = np.mean(contact_positions[[1, 3]], axis=0)
+        sole_forward = toe_center - heel_center
+        sole_lateral = positive_lateral - negative_lateral
+        sole_normal = np.cross(sole_forward, sole_lateral)
+        assert np.min(contact_bottom_heights) >= -1e-8
+        assert np.max(contact_bottom_heights) < 0.005
+        assert axis_alignment_error_deg(sole_forward, forward) < 2.0
+        assert axis_alignment_error_deg(sole_normal, up) < 2.0
+
+        hip_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_hip_pitch_joint")
+        knee_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_knee_joint")
+        ankle_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_ankle_pitch_joint")
+        ankle_roll_joint_id = mujoco.mj_name2id(
+            model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_ankle_roll_joint"
+        )
+        hip_position = data.xanchor[hip_joint_id]
+        knee_position = data.xanchor[knee_joint_id]
+        ankle_position = data.xanchor[ankle_joint_id]
+        assert axis_alignment_error_deg(knee_position - hip_position, ankle_position - knee_position) < 12.0
+        assert axis_alignment_error_deg(ankle_position - hip_position, -up) < 3.0
+        ankle_roll_qpos = data.qpos[model.jnt_qposadr[ankle_roll_joint_id]]
+        assert abs(np.degrees(ankle_roll_qpos)) < 4.0
+
+        foot_center = np.mean(contact_positions, axis=0)
+        target_lateral = data.qpos[1] + (1.0 if side == "left" else -1.0) * nominal_half_hip_width
+        # The G1's offset hip linkage places a neutral knee about 54 mm outside
+        # its hip line. Calibration reduces the offset while allowing a modestly
+        # wider stance that preserves straightness and ankle-roll workspace.
+        assert abs(knee_position[1] - target_lateral) < 0.04
+        assert abs(foot_center[1] - target_lateral) < 0.025
+
+    torso_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+    torso_rotation = data.xmat[torso_id].reshape(3, 3)
+    assert axis_alignment_error_deg(torso_rotation[:, 0], forward) < 1.0
+    torso_up = torso_rotation[:, 2]
+    assert axis_alignment_error_deg(torso_up, up) < 1.0

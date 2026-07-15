@@ -88,6 +88,27 @@ python examples/parallel_robot_retarget.py \
 The Xsens tennis files are local demo inputs; this code path works when `.hdf5`/`.h5` files are present in
 `demo_data/xsens_tennis`, but the retargeting code itself does not require those large files to be tracked by Git.
 
+### Calibrate and visualize the retargeted G1 T-pose
+
+The calibration follows the Xsens T-pose convention: arms and hands are horizontal, with both thumbs pointing
+character-forward. Generate the one-frame G1 calibration result, then open it in Viser. The standard 29-DoF G1
+model is used deliberately: its rubber-hand fingers are fixed and remain curled, but this is more faithful than
+substituting a different end-effector model.
+
+```bash
+python examples/xsens_tennis/calibrate_tpose.py \\
+    --data-path demo_data/xsens_tennis \\
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_02 \\
+    --robot g1 \\
+    --variant Tpose \\
+    --save-path demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz
+
+python viser_player.py \\
+    --robot-urdf models/g1/g1_29dof.urdf \\
+    --qpos-npz demo_results/g1/calibration/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02_tpose_calibration.npz \\
+    --no-assume-object-in-qpos
+```
+
 ## Data Preparation
 
 We provide `demo_data/` for fast testing. To test on more motion sequences, please follow the instructions below to download and prepare the data.
