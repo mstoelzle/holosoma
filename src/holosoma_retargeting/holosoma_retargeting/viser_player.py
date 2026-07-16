@@ -276,8 +276,10 @@ def make_player(
 
     if show_robot:
         robot_root = server.scene.add_frame("/robot", show_axes=False)
+        robot_urdf_path = resolve_package_path(config.robot_urdf)
         robot_urdf = yourdfpy.URDF.load(
-            resolve_package_path(config.robot_urdf),
+            str(robot_urdf_path),
+            mesh_dir=str(robot_urdf_path.parent),
             load_meshes=True,
             build_scene_graph=True,
         )
@@ -287,8 +289,10 @@ def make_player(
 
         if config.object_urdf:
             object_root = server.scene.add_frame("/object", show_axes=False)
+            object_urdf_path = resolve_package_path(config.object_urdf)
             object_urdf = yourdfpy.URDF.load(
-                resolve_package_path(config.object_urdf),
+                str(object_urdf_path),
+                mesh_dir=str(object_urdf_path.parent),
                 load_meshes=True,
                 build_scene_graph=True,
             )
