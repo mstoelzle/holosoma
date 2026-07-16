@@ -24,6 +24,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
     XsensHdf5Motion,
     load_xsens_hdf5_motion,
 )
+from holosoma_retargeting.kinematics import KinematicMorphologyAdapter, KinematicPose  # noqa: E402
 from holosoma_retargeting.src.recording_utils import (  # noqa: E402
     build_record_frame_indices,
     record_viser_sequence,
@@ -36,20 +37,18 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
     sample_qpos_at_time,
 )
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
-    XsensKinematicPositionProjector,
     XsensMotionSampler,
-    XsensSoleHeightEvaluator,
     XsensUsdActor,
     build_subject_xsens_reference_model,
     load_xsens_usd_model,
     resolve_g1_xsens_usd,
     resolve_package_path,
     resolve_subject_xsens_usd,
-    sole_grounding_offset_m,
     validate_g1_xsens_usd,
     validate_subject_xsens_usd,
 )
 from holosoma_retargeting.xsens.kinematic_model import TENNIS_RACKET_BODY  # noqa: E402
+from holosoma_retargeting.xsens.morphology_adaptation import build_xsens_morphology_adapter  # noqa: E402
 
 
 def load_npz(npz_path: str) -> tuple[np.ndarray, int]:
@@ -308,9 +307,7 @@ def make_player(
 
     xsens_actors: dict[ActorMode, XsensUsdActor] = {}
     xsens_sampler: XsensMotionSampler | None = None
-    g1_xsens_projector: XsensKinematicPositionProjector | None = None
-    subject_sole_evaluator: XsensSoleHeightEvaluator | None = None
-    g1_sole_evaluator: XsensSoleHeightEvaluator | None = None
+    g1_xsens_adapter: KinematicMorphologyAdapter | None = None
     subject_reference_model = None
     if show_xsens:
         assert xsens_config is not None and xsens_motion is not None and xsens_config.xsens_hdf5 is not None
@@ -342,17 +339,11 @@ def make_player(
                 show_meshes=xsens_config.show_xsens_meshes,
                 show_landmarks=xsens_config.show_xsens_landmarks,
             )
-            g1_xsens_projector = XsensKinematicPositionProjector(
+            g1_xsens_adapter = build_xsens_morphology_adapter(
                 g1_model,
                 xsens_sampler.segment_names,
-            )
-            subject_sole_evaluator = XsensSoleHeightEvaluator(
-                subject_reference_model,
-                xsens_sampler.segment_names,
-            )
-            g1_sole_evaluator = XsensSoleHeightEvaluator(
-                g1_model,
-                xsens_sampler.segment_names,
+                source_model=subject_reference_model,
+                grounding="match_lowest_soles",
             )
         for mode, actor in xsens_actors.items():
             actor.root.position = xsens_actor_offsets[mode]
@@ -501,26 +492,17 @@ def make_player(
 
     def _apply_time(time_s: float) -> None:
         xsens_pose = xsens_sampler.sample(time_s)
-        frame_actor_offsets = {
-            mode: np.asarray(offset, dtype=float).copy()
-            for mode, offset in xsens_actor_offsets.items()
-        }
         g1_positions = None
         if "g1_xsens" in xsens_actors:
-            assert g1_xsens_projector is not None
-            assert subject_sole_evaluator is not None and g1_sole_evaluator is not None
-            g1_positions = g1_xsens_projector.project(
-                xsens_pose.positions_m,
-                xsens_pose.quaternions_wxyz,
+            assert g1_xsens_adapter is not None
+            g1_pose = g1_xsens_adapter.adapt_pose(
+                KinematicPose(
+                    xsens_sampler.segment_names,
+                    xsens_pose.positions_m,
+                    xsens_pose.quaternions_wxyz,
+                )
             )
-            frame_actor_offsets["g1_xsens"][2] += sole_grounding_offset_m(
-                subject_sole_evaluator,
-                g1_sole_evaluator,
-                xsens_pose.positions_m,
-                g1_positions,
-                xsens_pose.quaternions_wxyz,
-            )
-            xsens_actors["g1_xsens"].root.position = frame_actor_offsets["g1_xsens"]
+            g1_positions = g1_pose.positions_m
 
         avatar_positions: list[np.ndarray] = []
         for mode, actor in xsens_actors.items():
@@ -531,7 +513,7 @@ def make_player(
                 actor_positions,
                 xsens_pose.quaternions_wxyz,
             )
-            avatar_positions.append(actor_positions + frame_actor_offsets[mode][None, :])
+            avatar_positions.append(actor_positions + xsens_actor_offsets[mode][None, :])
         robot_position = None
         if show_robot:
             assert qpos is not None and robot_applier is not None

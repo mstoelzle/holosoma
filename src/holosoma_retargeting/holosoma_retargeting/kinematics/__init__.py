@@ -13,9 +13,23 @@ from .model import (
     validate_kinematic_tree,
     with_body_attachments,
 )
+from .morphology import (
+    GroundingSurface,
+    KinematicMorphologyAdapter,
+    KinematicMotion,
+    KinematicPose,
+    LowestSurfaceGrounding,
+    reference_grounding_offset_m,
+    reference_root_floor_clearance_m,
+)
 
 __all__ = [
+    "GroundingSurface",
+    "KinematicMorphologyAdapter",
+    "KinematicMotion",
+    "KinematicPose",
     "KinematicTree",
+    "LowestSurfaceGrounding",
     "MeshAttachment",
     "PointSetAttachment",
     "RigidBodyDefinition",
@@ -24,6 +38,8 @@ __all__ = [
     "ValidationReport",
     "compute_joint_positions",
     "compute_reference_joint_positions",
+    "reference_grounding_offset_m",
+    "reference_root_floor_clearance_m",
     "validate_kinematic_tree",
     "with_body_attachments",
 ]

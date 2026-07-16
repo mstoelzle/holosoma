@@ -10,22 +10,19 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XsensHdf5Motion,
 )
 from holosoma_retargeting.kinematics import (
+    KinematicMorphologyAdapter,
+    KinematicMotion,
+    KinematicPose,
     KinematicTree,
     MeshAttachment,
     RigidBodyDefinition,
     SphericalJointDefinition,
     Transform,
-    compute_joint_positions,
 )
 from holosoma_retargeting.src.viser_utils import sample_qpos_at_time
 from holosoma_retargeting.src.xsens_viser import (
-    XsensKinematicPositionProjector,
     XsensMotionSampler,
-    XsensSoleHeightEvaluator,
     XsensUsdActor,
-    reference_grounding_offset_m,
-    reference_root_floor_clearance_m,
-    sole_grounding_offset_m,
     validate_g1_xsens_usd,
 )
 from holosoma_retargeting.xsens.g1_kinematic_reduction import G1_XSENS_REDUCTION_VERSION
@@ -135,193 +132,43 @@ def _two_segment_model() -> KinematicTree:
     return KinematicTree("two_segment", "Pelvis", bodies, (joint,))
 
 
-def test_kinematic_projector_matches_authored_reference_pose() -> None:
+def test_native_timestamp_sampler_results_match_batch_morphology_adaptation() -> None:
     model = _two_segment_model()
-    projector = XsensKinematicPositionProjector(model, ("Pelvis", "Child"))
-    positions = np.array([body.reference_pose.translation_m for body in model.bodies])
-    orientations = np.array([body.reference_pose.rotation_wxyz for body in model.bodies])
-
-    projected = projector.project(positions, orientations)
-
-    np.testing.assert_allclose(projected, positions)
-
-
-def test_kinematic_projector_uses_model_lengths_and_preserves_root() -> None:
-    model = _two_segment_model()
-    projector = XsensKinematicPositionProjector(model, ("Pelvis", "Child"))
-    human_positions = np.array([[10.0, 20.0, 30.0], [10.0, 20.0, 33.0]])
-    orientations = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
-
-    projected = projector.project(human_positions, orientations)
-
-    np.testing.assert_array_equal(projected[0], human_positions[0])
-    poses = {
-        body.name: Transform(projected[index], orientations[index])
-        for index, body in enumerate(model.bodies)
-    }
-    joint_positions = compute_joint_positions(model, poses)
-    parent_joint_position = projected[0] + np.array([0.0, 0.0, 0.5])
-    np.testing.assert_allclose(joint_positions["Joint"], parent_joint_position)
-    assert not np.array_equal(projected[1], human_positions[1])
-
-
-def test_reference_grounding_offset_aligns_models_with_different_leg_lengths() -> None:
-    floor_mesh = MeshAttachment(
-        name="floor",
-        vertices_m=np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0]]),
-        faces=np.array([[0, 1, 2]]),
+    mapping = {"Pelvis": "Pelvis", "Child": "Child"}
+    adapter = KinematicMorphologyAdapter(
+        model,
+        ("Pelvis", "Child"),
+        target_body_to_source_body=mapping,
     )
-    source = KinematicTree(
-        "source",
-        "Pelvis",
-        (
-            RigidBodyDefinition("Pelvis", Transform(np.array([0.0, 0.0, 1.0]))),
-            RigidBodyDefinition("Foot", Transform.identity(), meshes=(floor_mesh,)),
-        ),
-        (),
-    )
-    target = KinematicTree(
-        "target",
-        "Pelvis",
-        (
-            RigidBodyDefinition("Pelvis", Transform(np.array([0.0, 0.0, 0.75]))),
-            RigidBodyDefinition("Foot", Transform.identity(), meshes=(floor_mesh,)),
-        ),
-        (),
-    )
-
-    assert reference_root_floor_clearance_m(source) == 1.0
-    assert reference_root_floor_clearance_m(target) == 0.75
-    assert reference_grounding_offset_m(source, target) == -0.25
-
-
-_SOLE_SEGMENT_NAMES = ("Pelvis", "LeftFoot", "LeftToe", "RightFoot", "RightToe")
-
-
-def _sole_model(*, pelvis_z: float = 1.0, sole_body_z: float = 0.05) -> KinematicTree:
-    outsole = MeshAttachment(
-        name="test_outsole",
-        vertices_m=np.array(
-            [
-                [-0.1, -0.05, -0.05],
-                [0.1, -0.05, -0.05],
-                [-0.1, 0.05, -0.05],
-            ]
-        ),
-        faces=np.array([[0, 1, 2]]),
-    )
-    bodies = [
-        RigidBodyDefinition(
-            "Pelvis",
-            Transform(np.array([0.0, 0.0, pelvis_z])),
-            metadata={"xsens:sourceSegmentName": "Pelvis"},
-        )
-    ]
-    bodies.extend(
-        [
-            RigidBodyDefinition(
-                body_name,
-                Transform(np.array([0.0, 0.0, sole_body_z])),
-                meshes=(outsole,),
-                metadata={"xsens:sourceSegmentName": body_name},
-            )
-            for body_name in _SOLE_SEGMENT_NAMES[1:]
-        ]
-    )
-    return KinematicTree("sole_model", "Pelvis", tuple(bodies), ())
-
-
-def _reference_poses(model: KinematicTree) -> tuple[np.ndarray, np.ndarray]:
-    body_map = model.body_map()
-    positions = np.array([body_map[name].reference_pose.translation_m for name in _SOLE_SEGMENT_NAMES])
-    quaternions = np.array([body_map[name].reference_pose.rotation_wxyz for name in _SOLE_SEGMENT_NAMES])
-    return positions, quaternions
-
-
-def test_sole_evaluator_selects_the_lowest_foot_or_toe_on_each_side() -> None:
-    evaluator = XsensSoleHeightEvaluator(_sole_model(), _SOLE_SEGMENT_NAMES)
     positions = np.array(
         [
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.50],
-            [0.0, 0.0, 0.40],
-            [0.0, 0.0, 0.70],
-            [0.0, 0.0, 0.60],
+            [[0.0, 0.0, 1.0], [0.0, 0.0, 99.0]],
+            [[1.0, 2.0, 3.0], [4.0, 5.0, -99.0]],
         ]
     )
-    quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(_SOLE_SEGMENT_NAMES), 1))
-
-    heights = evaluator.side_heights_m(positions, quaternions)
-
-    np.testing.assert_allclose([heights["left"], heights["right"]], [0.35, 0.55])
-    assert evaluator.minimum_height_m(positions, quaternions) == heights["left"]
-
-    positions[[2, 4], 2] = [0.80, 0.20]
-    switched_heights = evaluator.side_heights_m(positions, quaternions)
-    assert evaluator.minimum_height_m(positions, quaternions) == switched_heights["right"]
-
-
-def test_dynamic_sole_grounding_matches_reference_offset_in_tpose_and_changes_with_pose() -> None:
-    source_model = _sole_model(sole_body_z=0.05)
-    target_model = _sole_model(sole_body_z=0.25)
-    source_evaluator = XsensSoleHeightEvaluator(source_model, _SOLE_SEGMENT_NAMES)
-    target_evaluator = XsensSoleHeightEvaluator(target_model, _SOLE_SEGMENT_NAMES)
-    source_positions, quaternions = _reference_poses(source_model)
-    target_positions, _ = _reference_poses(target_model)
-
-    reference_offset = reference_grounding_offset_m(source_model, target_model)
-    dynamic_offset = sole_grounding_offset_m(
-        source_evaluator,
-        target_evaluator,
-        source_positions,
-        target_positions,
-        quaternions,
+    orientations = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (2, 2, 1))
+    times_s = np.array([10.0, 12.0])
+    motion = XsensHdf5Motion(
+        positions_m=positions,
+        times_s=times_s,
+        stream_name="body_position_xyz_m",
+        segment_names=["Pelvis", "Child"],
+        source_indices=[0, 1],
+        quaternions_wijk=orientations,
+        orientation_stream_name="body_orientation_quaternion_wijk",
+    )
+    sampler = XsensMotionSampler(motion)
+    batch = adapter.adapt_motion(
+        KinematicMotion(("Pelvis", "Child"), positions, orientations, times_s)
     )
 
-    np.testing.assert_allclose(dynamic_offset, reference_offset)
-    np.testing.assert_allclose(dynamic_offset, -0.2)
-
-    bent_target_positions = target_positions.copy()
-    bent_target_positions[1:, 2] += 0.1
-    bent_offset = sole_grounding_offset_m(
-        source_evaluator,
-        target_evaluator,
-        source_positions,
-        bent_target_positions,
-        quaternions,
-    )
-    np.testing.assert_allclose(bent_offset, -0.3)
-
-
-def test_dynamic_sole_grounding_preserves_absolute_airborne_height_without_scaling() -> None:
-    source_evaluator = XsensSoleHeightEvaluator(_sole_model(sole_body_z=0.05), _SOLE_SEGMENT_NAMES)
-    target_evaluator = XsensSoleHeightEvaluator(_sole_model(sole_body_z=0.25), _SOLE_SEGMENT_NAMES)
-    source_positions, quaternions = _reference_poses(_sole_model(sole_body_z=0.05))
-    target_positions, _ = _reference_poses(_sole_model(sole_body_z=0.25))
-
-    ground_offset = sole_grounding_offset_m(
-        source_evaluator,
-        target_evaluator,
-        source_positions,
-        target_positions,
-        quaternions,
-    )
-    jump_height_m = 0.4
-    airborne_source = source_positions + np.array([0.0, 0.0, jump_height_m])
-    airborne_target = target_positions + np.array([0.0, 0.0, jump_height_m])
-    airborne_offset = sole_grounding_offset_m(
-        source_evaluator,
-        target_evaluator,
-        airborne_source,
-        airborne_target,
-        quaternions,
-    )
-
-    np.testing.assert_allclose(airborne_offset, ground_offset)
-    source_airborne_height = source_evaluator.minimum_height_m(airborne_source, quaternions)
-    shifted_target_height = target_evaluator.minimum_height_m(airborne_target, quaternions) + airborne_offset
-    np.testing.assert_allclose(shifted_target_height, source_airborne_height)
-    np.testing.assert_allclose(source_airborne_height, jump_height_m)
+    for frame_index, native_time_s in enumerate(times_s):
+        sample = sampler.sample(native_time_s - times_s[0])
+        adapted = adapter.adapt_pose(
+            KinematicPose(sampler.segment_names, sample.positions_m, sample.quaternions_wxyz)
+        )
+        np.testing.assert_array_equal(adapted.positions_m, batch.positions_m[frame_index])
+        np.testing.assert_array_equal(adapted.orientations_wxyz, batch.orientations_wxyz[frame_index])
 
 
 def test_motion_sampler_uses_timestamps_and_shortest_arc_slerp() -> None:

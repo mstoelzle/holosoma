@@ -7,7 +7,12 @@ import mujoco
 import numpy as np
 import pytest
 
-from holosoma_retargeting.kinematics import compute_reference_joint_positions, validate_kinematic_tree
+from holosoma_retargeting.kinematics import (
+    KinematicPose,
+    compute_reference_joint_positions,
+    validate_kinematic_tree,
+)
+from holosoma_retargeting.kinematics.model import rotate_vector
 from holosoma_retargeting.xsens.avatar_mesh import build_xsens_avatar_meshes
 from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     G1Anthropometry,
@@ -17,6 +22,7 @@ from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     extract_g1_anthropometry,
     g1_anthropometry_to_xsens_avatar_proportions,
 )
+from holosoma_retargeting.xsens.morphology_adaptation import build_xsens_morphology_adapter
 
 
 @pytest.fixture(scope="module")
@@ -299,6 +305,59 @@ def test_generation_is_deterministic(anthropometry: G1Anthropometry) -> None:
         for first_mesh, second_mesh in zip(first_body.meshes, second_body.meshes, strict=True):
             np.testing.assert_array_equal(first_mesh.vertices_m, second_mesh.vertices_m)
             np.testing.assert_array_equal(first_mesh.faces, second_mesh.faces)
+
+
+def test_xsens_morphology_adapter_preserves_order_and_target_anchors(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    source_names = tuple(str(body.metadata["xsens:sourceSegmentName"]) for body in model.bodies)
+    assert source_names[-1] == "RightHandSword"
+    adapter = build_xsens_morphology_adapter(model, source_names)
+    assert adapter.target_body_to_source_body["TennisRacket"] == "RightHandSword"
+    source_positions = np.stack([body.reference_pose.translation_m for body in model.bodies])
+    source_positions[1:] += np.array([10.0, -4.0, 2.0])
+    orientations = np.stack([body.reference_pose.rotation_wxyz for body in model.bodies])
+
+    adapted = adapter.adapt_pose(KinematicPose(source_names, source_positions, orientations))
+
+    assert adapted.body_names == source_names
+    np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
+    np.testing.assert_array_equal(adapted.positions_m[0], source_positions[0])
+    source_indices = {name: index for index, name in enumerate(source_names)}
+    body_to_source = adapter.target_body_to_source_body
+    for joint in model.joints:
+        parent_index = source_indices[body_to_source[joint.parent_body]]
+        child_index = source_indices[body_to_source[joint.child_body]]
+        parent_anchor = adapted.positions_m[parent_index] + rotate_vector(
+            adapted.orientations_wxyz[parent_index],
+            joint.parent_frame.translation_m,
+        )
+        child_anchor = adapted.positions_m[child_index] + rotate_vector(
+            adapted.orientations_wxyz[child_index],
+            joint.child_frame.translation_m,
+        )
+        np.testing.assert_allclose(parent_anchor, child_anchor, atol=5e-6)
+
+
+def test_xsens_lowest_sole_grounding_uses_shared_avatar_outsoles(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    source_names = tuple(str(body.metadata["xsens:sourceSegmentName"]) for body in model.bodies)
+    adapter = build_xsens_morphology_adapter(
+        model,
+        source_names,
+        source_model=model,
+        grounding="match_lowest_soles",
+    )
+    positions = np.stack([body.reference_pose.translation_m for body in model.bodies])
+    orientations = np.stack([body.reference_pose.rotation_wxyz for body in model.bodies])
+
+    adapted = adapter.adapt_pose(KinematicPose(source_names, positions, orientations))
+
+    np.testing.assert_allclose(adapted.positions_m, positions, atol=5e-6)
+    np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
 
 
 def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_path) -> None:
