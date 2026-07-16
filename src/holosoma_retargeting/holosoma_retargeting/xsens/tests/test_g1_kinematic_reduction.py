@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import inspect
+import json
+
+import mujoco
+import numpy as np
+import pytest
+
+from holosoma_retargeting.kinematics import compute_reference_joint_positions, validate_kinematic_tree
+from holosoma_retargeting.xsens.avatar_mesh import build_xsens_avatar_meshes
+from holosoma_retargeting.xsens.g1_kinematic_reduction import (
+    G1Anthropometry,
+    G1XsensReductionConfig,
+    build_g1_proportioned_xsens_tree,
+    export_g1_proportioned_xsens_usd,
+    extract_g1_anthropometry,
+    g1_anthropometry_to_xsens_avatar_proportions,
+)
+
+
+@pytest.fixture(scope="module")
+def anthropometry() -> G1Anthropometry:
+    return extract_g1_anthropometry()
+
+
+def _rigid_lengths(model) -> dict[str, float]:
+    bodies = model.body_map()
+    joints = compute_reference_joint_positions(model)
+    return {
+        "upper_arm": float(
+            np.linalg.norm(
+                bodies["LeftForeArm"].reference_pose.translation_m - bodies["LeftUpperArm"].reference_pose.translation_m
+            )
+        ),
+        "forearm": float(np.linalg.norm(joints["LeftWrist"] - bodies["LeftForeArm"].reference_pose.translation_m)),
+        "thigh": float(
+            np.linalg.norm(
+                bodies["LeftLowerLeg"].reference_pose.translation_m
+                - bodies["LeftUpperLeg"].reference_pose.translation_m
+            )
+        ),
+        "shank": float(np.linalg.norm(joints["LeftAnkle"] - bodies["LeftLowerLeg"].reference_pose.translation_m)),
+    }
+
+
+def test_anthropometry_extraction_has_no_pose_input_or_state_evaluation(monkeypatch) -> None:
+    assert "qpos" not in inspect.signature(extract_g1_anthropometry).parameters
+
+    def reject_mjdata(*_args, **_kwargs):
+        raise AssertionError("pose-independent extraction must not create MjData")
+
+    monkeypatch.setattr(mujoco, "MjData", reject_mjdata)
+    result = extract_g1_anthropometry()
+
+    assert result.lengths_m["upper_arm"] > 0.0
+    assert result.lengths_m["forearm"] > 0.0
+    assert not np.isclose(result.lengths_m["upper_arm"], result.lengths_m["forearm"])
+
+
+def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    bodies = model.body_map()
+    joints = model.joint_map()
+
+    assert len(model.bodies) == 24
+    assert len(model.joints) == 23
+    assert model.bodies[-1].name == "TennisRacket"
+    assert model.bodies[-1].metadata["xsens:sourceSegmentName"] == "RightHandSword"
+    assert {mesh.name for mesh in model.bodies[-1].meshes} == {
+        "racket_grip",
+        "racket_frame",
+        "racket_strings",
+    }
+    assert model.metadata["model:preserveJointOffsets"] is False
+    assert validate_kinematic_tree(model).is_valid
+    np.testing.assert_allclose(joints["LeftShoulder"].child_frame.translation_m, np.zeros(3))
+    np.testing.assert_allclose(
+        np.linalg.norm(
+            bodies["LeftUpperArm"].reference_pose.translation_m - bodies["LeftShoulder"].reference_pose.translation_m
+        ),
+        np.linalg.norm(anthropometry.compound_offsets_m["left_shoulder"]),
+    )
+    np.testing.assert_allclose(joints["LeftHip"].child_frame.translation_m, np.zeros(3))
+    np.testing.assert_allclose(joints["LeftWrist"].child_frame.translation_m, np.zeros(3))
+    np.testing.assert_allclose(joints["LeftAnkle"].child_frame.translation_m, np.zeros(3))
+    for name, value in _rigid_lengths(model).items():
+        np.testing.assert_allclose(value, anthropometry.lengths_m[name], atol=1e-12)
+
+
+def test_preserved_offsets_appear_once_without_changing_rigid_lengths(
+    anthropometry: G1Anthropometry,
+) -> None:
+    collapsed = build_g1_proportioned_xsens_tree(anthropometry)
+    preserved = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(preserve_joint_offsets=True),
+    )
+    collapsed_bodies = collapsed.body_map()
+    preserved_bodies = preserved.body_map()
+    preserved_joints = preserved.joint_map()
+
+    assert preserved.metadata["model:preserveJointOffsets"] is True
+    assert validate_kinematic_tree(preserved).is_valid
+    assert not np.allclose(
+        preserved_bodies["LeftShoulder"].reference_pose.translation_m,
+        preserved_bodies["LeftUpperArm"].reference_pose.translation_m,
+    )
+    assert np.linalg.norm(preserved_joints["LeftHip"].child_frame.translation_m) > 0.0
+    assert np.linalg.norm(preserved_joints["LeftWrist"].child_frame.translation_m) > 0.0
+    assert np.linalg.norm(preserved_joints["LeftAnkle"].child_frame.translation_m) > 0.0
+    for name, value in _rigid_lengths(preserved).items():
+        np.testing.assert_allclose(value, anthropometry.lengths_m[name], atol=1e-12)
+
+    for body_name in ("LeftUpperArm", "LeftForeArm", "LeftUpperLeg", "LeftLowerLeg"):
+        collapsed_mesh = collapsed_bodies[body_name].meshes[0]
+        preserved_mesh = preserved_bodies[body_name].meshes[0]
+        np.testing.assert_allclose(collapsed_mesh.vertices_m, preserved_mesh.vertices_m)
+        np.testing.assert_array_equal(collapsed_mesh.faces, preserved_mesh.faces)
+
+
+def test_shared_pelvis_and_upper_leg_visuals_cover_g1_waist_and_hip_spans(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    bodies = model.body_map()
+    pelvis = bodies["Pelvis"]
+    assert {mesh.name for mesh in pelvis.meshes} == {"pelvis_shell", "pelvis_panel"}
+    vertices = np.vstack([mesh.vertices_m for mesh in pelvis.meshes])
+
+    assert anthropometry.region_centers_m["pelvis"][2] < -0.08
+    np.testing.assert_allclose(
+        np.ptp(vertices, axis=0)[:2],
+        anthropometry.region_extents_m["pelvis"][:2],
+        atol=1e-12,
+    )
+    pelvis_position = pelvis.reference_pose.translation_m
+    extracted_bottom = anthropometry.region_centers_m["pelvis"][2] - 0.5 * anthropometry.region_extents_m["pelvis"][2]
+    np.testing.assert_allclose(vertices[:, 2].min(), extracted_bottom, atol=1e-12)
+    for title in ("Left", "Right"):
+        hip = bodies[f"{title}UpperLeg"].reference_pose.translation_m - pelvis_position
+        upper_leg_vertices = np.vstack([mesh.vertices_m for mesh in bodies[f"{title}UpperLeg"].meshes])
+        assert float(hip[2] + upper_leg_vertices[:, 2].max()) >= float(extracted_bottom) - 1e-12
+    l5 = bodies["L5"].reference_pose.translation_m - pelvis_position
+    assert float(vertices[:, 2].max()) >= float(l5[2]) - 1e-12
+
+
+def test_all_standard_visuals_come_from_shared_calibrated_avatar_factory(
+    anthropometry: G1Anthropometry,
+) -> None:
+    proportions = g1_anthropometry_to_xsens_avatar_proportions(anthropometry)
+    shared = build_xsens_avatar_meshes(proportions)
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+
+    for body_name in proportions.segment_names:
+        generated_meshes = model.body_map()[body_name].meshes
+        shared_parts = shared[body_name]
+        assert [mesh.name for mesh in generated_meshes] == [part.name for part in shared_parts]
+        for mesh, part in zip(generated_meshes, shared_parts, strict=True):
+            np.testing.assert_array_equal(mesh.faces, part.mesh.faces)
+            assert mesh.color_rgb == part.color
+            assert mesh.category == part.category
+
+
+def test_spine_visual_uses_tapered_calibrated_avatar_style(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    bodies = model.body_map()
+
+    for name in ("L5", "L3", "T12", "T8"):
+        mesh_names = {mesh.name for mesh in bodies[name].meshes}
+        assert mesh_names == {f"{name.lower()}_shell", f"{name.lower()}_rear_panel"}
+        shell = next(mesh for mesh in bodies[name].meshes if mesh.name.endswith("_shell"))
+        distal_z = model.joint_map()[
+            {"L5": "L4L3", "L3": "L1T12", "T12": "T9T8", "T8": "T1C7"}[name]
+        ].parent_frame.translation_m[2]
+        assert float(shell.vertices_m[:, 2].min()) > 0.0
+        assert float(shell.vertices_m[:, 2].max()) < float(distal_z)
+
+    l5_width = np.ptp(np.vstack([mesh.vertices_m for mesh in bodies["L5"].meshes]), axis=0)[1]
+    t8_width = np.ptp(np.vstack([mesh.vertices_m for mesh in bodies["T8"].meshes]), axis=0)[1]
+    assert t8_width > l5_width
+
+
+def test_hands_reuse_calibrated_avatar_parts_and_match_g1_envelope(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(anthropometry)
+    target_extent = np.array(
+        [
+            2.0 * anthropometry.segment_radii_m["hand"][1],
+            anthropometry.lengths_m["hand"],
+            2.0 * anthropometry.segment_radii_m["hand"][0],
+        ]
+    )
+
+    for title, sign in (("Left", 1.0), ("Right", -1.0)):
+        meshes = model.body_map()[f"{title}Hand"].meshes
+        names = {mesh.name for mesh in meshes}
+        assert f"{title.lower()}hand_palm" in names
+        assert f"{title.lower()}hand_thumb" in names
+        assert sum("_finger_" in name and "joint" not in name for name in names) == 4
+        vertices = np.vstack([mesh.vertices_m for mesh in meshes])
+        np.testing.assert_allclose(np.ptp(vertices, axis=0), target_extent, atol=1e-12)
+        if sign > 0.0:
+            np.testing.assert_allclose(vertices[:, 1].min(), 0.0, atol=1e-12)
+        else:
+            np.testing.assert_allclose(vertices[:, 1].max(), 0.0, atol=1e-12)
+
+        thumb = np.vstack([mesh.vertices_m for mesh in meshes if "thumb" in mesh.name])
+        fingers = np.vstack(
+            [mesh.vertices_m for mesh in meshes if "_finger_" in mesh.name and "joint" not in mesh.name]
+        )
+        assert float(thumb[:, 0].max()) > float(fingers[:, 0].max())
+        assert float(thumb[:, 0].max()) > 0.0
+
+
+def test_generation_is_deterministic(anthropometry: G1Anthropometry) -> None:
+    first = build_g1_proportioned_xsens_tree(anthropometry)
+    second = build_g1_proportioned_xsens_tree(anthropometry)
+
+    for first_body, second_body in zip(first.bodies, second.bodies, strict=True):
+        assert first_body.name == second_body.name
+        np.testing.assert_array_equal(
+            first_body.reference_pose.translation_m,
+            second_body.reference_pose.translation_m,
+        )
+        for first_mesh, second_mesh in zip(first_body.meshes, second_body.meshes, strict=True):
+            np.testing.assert_array_equal(first_mesh.vertices_m, second_mesh.vertices_m)
+            np.testing.assert_array_equal(first_mesh.faces, second_mesh.faces)
+
+
+def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_path) -> None:
+    pytest.importorskip("pxr")
+    output_path = tmp_path / "g1_proportioned_xsens.usda"
+    report = export_g1_proportioned_xsens_usd(
+        output_path,
+        config=G1XsensReductionConfig(preserve_joint_offsets=False),
+    )
+    payload = json.loads(report.report_path.read_text(encoding="utf-8"))
+
+    assert output_path.is_file()
+    assert report.report_path.is_file()
+    assert report.body_count == 24
+    assert report.joint_count == 23
+    assert report.max_length_error_m < 1e-12
+    assert report.max_joint_residual_m < 5e-6
+    assert payload["preserve_joint_offsets"] is False
+    assert any(np.linalg.norm(value) > 0.0 for value in payload["raw_offsets_m"].values())
+    assert np.linalg.norm(payload["root_anchors_m"]["left_hip"]) > 0.0
+    assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_hip"]) > 0.0
+    assert all(np.linalg.norm(value) == 0.0 for value in payload["applied_offsets_m"].values())

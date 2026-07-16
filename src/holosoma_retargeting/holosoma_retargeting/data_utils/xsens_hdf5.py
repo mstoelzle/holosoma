@@ -54,6 +54,7 @@ XSENS_BODY_SEGMENT_NAMES = [
     "Left Foot",
     "Left Toe",
 ]
+XSENS_TRACKED_PROP_NAMES = ["RightHandSword"]
 
 
 @dataclass(frozen=True)
@@ -391,23 +392,38 @@ def _normalize_segment_name(name: str) -> str:
     return "".join(name.lower().split())
 
 
-def _body_segment_indices(segment_names: list[str] | None, n_segments: int) -> tuple[list[str], list[int]]:
+def _body_segment_indices(
+    segment_names: list[str] | None,
+    n_segments: int,
+    *,
+    include_tracked_props: bool = False,
+) -> tuple[list[str], list[int]]:
     if segment_names is None:
         if n_segments < len(XSENS_BODY_SEGMENT_NAMES):
             raise ValueError(
                 f"Expected at least {len(XSENS_BODY_SEGMENT_NAMES)} Xsens body segments, got {n_segments}"
             )
-        if n_segments == len(XSENS_BODY_SEGMENT_NAMES) + 1:
-            # Common tennis recording layout: body segments plus RightHandSword after the body list.
-            return XSENS_BODY_SEGMENT_NAMES, list(range(len(XSENS_BODY_SEGMENT_NAMES)))
-        return XSENS_BODY_SEGMENT_NAMES, list(range(len(XSENS_BODY_SEGMENT_NAMES)))
+        selected_names = list(XSENS_BODY_SEGMENT_NAMES)
+        source_indices = list(range(len(XSENS_BODY_SEGMENT_NAMES)))
+        if include_tracked_props and n_segments >= len(XSENS_BODY_SEGMENT_NAMES) + 1:
+            # Common tennis layout: the tracked racket frame follows the 23 body segments.
+            selected_names.append(XSENS_TRACKED_PROP_NAMES[0])
+            source_indices.append(len(XSENS_BODY_SEGMENT_NAMES))
+        return selected_names, source_indices
 
     normalized_to_index = {_normalize_segment_name(name): i for i, name in enumerate(segment_names)}
     missing = [name for name in XSENS_BODY_SEGMENT_NAMES if _normalize_segment_name(name) not in normalized_to_index]
     if missing:
         raise ValueError(f"Xsens stream is missing body segments: {missing}")
-    source_indices = [normalized_to_index[_normalize_segment_name(name)] for name in XSENS_BODY_SEGMENT_NAMES]
-    return XSENS_BODY_SEGMENT_NAMES, source_indices
+    selected_names = list(XSENS_BODY_SEGMENT_NAMES)
+    source_indices = [normalized_to_index[_normalize_segment_name(name)] for name in selected_names]
+    if include_tracked_props:
+        for prop_name in XSENS_TRACKED_PROP_NAMES:
+            source_index = normalized_to_index.get(_normalize_segment_name(prop_name))
+            if source_index is not None:
+                selected_names.append(prop_name)
+                source_indices.append(source_index)
+    return selected_names, source_indices
 
 
 def _unit_scale_for_stream(stream_name: str) -> float:
@@ -454,8 +470,10 @@ def load_xsens_hdf5_motion(
     target_fps: float | None = 30.0,
     frame_start: int = 0,
     max_frames: int | None = None,
+    *,
+    include_tracked_props: bool = False,
 ) -> XsensHdf5Motion:
-    """Load synchronized Xsens body segment positions and orientations."""
+    """Load synchronized Xsens segment poses and optional tracked props."""
     h5py = _import_h5py()
     path = Path(path)
 
@@ -471,7 +489,11 @@ def load_xsens_hdf5_motion(
         orientation_times_s = np.asarray(orientation_group["time_s"], dtype=float).reshape(-1)
 
     positions = _reshape_position_data(positions, segment_names)
-    selected_segment_names, source_indices = _body_segment_indices(segment_names, positions.shape[1])
+    selected_segment_names, source_indices = _body_segment_indices(
+        segment_names,
+        positions.shape[1],
+        include_tracked_props=include_tracked_props,
+    )
     positions = positions[:, source_indices, :] * _unit_scale_for_stream(stream_name)
     positions = transform_xsens_stream_to_retargeting(positions, stream_name)
 
@@ -479,7 +501,9 @@ def load_xsens_hdf5_motion(
     sample_indices = _slice_sample_indices(sample_indices, frame_start, max_frames)
     quaternions = _reshape_quaternion_data(quaternions, orientation_segment_names)
     selected_orientation_names, orientation_source_indices = _body_segment_indices(
-        orientation_segment_names, quaternions.shape[1]
+        orientation_segment_names,
+        quaternions.shape[1],
+        include_tracked_props=include_tracked_props,
     )
     if selected_orientation_names != selected_segment_names:
         raise ValueError("Xsens position and orientation body segment selections differ")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -34,11 +35,14 @@ class ViserConfig:
     show_meshes: bool = True
     """Whether to show mesh visualizations."""
 
-    grid_width: float = 8.0
-    """Grid width for visualization."""
+    grid_width: float | None = None
+    """Optional minimum grid width. None derives it entirely from motion bounds."""
 
-    grid_height: float = 8.0
-    """Grid height for visualization."""
+    grid_height: float | None = None
+    """Optional minimum grid height. None derives it entirely from motion bounds."""
+
+    grid_padding: float = 1.0
+    """Horizontal padding around the complete motion bounds, in metres."""
 
     visual_fps_multiplier: int = 2
     """Visual FPS multiplier for interpolation."""
@@ -96,3 +100,29 @@ class ViserConfig:
 
     max_interp_mult: int = 8
     """Maximum interpolation multiplier."""
+
+
+@dataclass(frozen=True)
+class XsensViserConfig(ViserConfig):
+    """Viser configuration for Xsens and combined robot/Xsens playback."""
+
+    actor_mode: Literal["robot", "xsens", "g1_xsens", "both"] = "robot"
+    """Actors to display. ``both`` means the G1 robot and calibrated Xsens avatar."""
+
+    xsens_hdf5: str | None = None
+    """Xsens HDF5 motion used by xsens, g1_xsens, and both modes."""
+
+    xsens_usd: str | None = None
+    """Recording-specific Xsens USDA override; defaults to the HDF5 sibling model."""
+
+    g1_xsens_usd: str | None = None
+    """G1-proportioned Xsens USDA override; defaults to the packaged demo result."""
+
+    xsens_target_fps: float | None = None
+    """Optional HDF5 pre-sampling rate. None preserves the native timestamps."""
+
+    show_xsens_meshes: bool = True
+    """Whether Xsens avatar meshes are initially visible."""
+
+    show_xsens_landmarks: bool = False
+    """Whether calibrated Xsens landmarks are initially visible."""

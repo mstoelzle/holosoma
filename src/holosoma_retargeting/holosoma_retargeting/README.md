@@ -113,6 +113,53 @@ The implementation is reusable by layer: `data_utils.xsens_hdf5` reads calibrati
 `xsens.kinematic_model` constructs a backend-independent tree, `kinematics` provides generic model/FK operations,
 and `usd` reads, writes, validates, or replaces a kinematic subtree in an existing stage.
 
+### Generate a source-independent Xsens model with G1 proportions
+
+The G1 reduction reads fixed joint origins and link-local meshes from the packaged 29-DoF model. It does not load
+an Xsens recording, accept a robot `qpos`, or solve against a particular G1 pose. Upper arm, forearm, hand, thigh,
+shank, foot, and toe dimensions are measured independently before the canonical Xsens T-pose is assembled:
+
+```bash
+python examples/xsens_tennis/generate_g1_xsens_usd.py \
+    --output-path demo_results/g1/models/g1_proportioned_xsens.usda
+```
+
+Its visuals reuse the calibrated Xsens avatar language (tapered spine shells, rear panels, palms, fingers, and
++X-facing thumbs) and scale those elements to G1-derived local envelopes. Pelvis, waist, and hip adapter visuals
+cover static spans that would otherwise appear as gaps without changing any joint anchor or rigid limb length.
+
+By default, translations between the axes of G1 compound joints are collapsed to produce idealized Xsens
+spherical joints. The scalar shoulder and hip cluster extents are retained in straight adapter spans, so collapsing
+the axes does not shrink the avatar. Generate the comparison variant with the full spatial offsets retained using:
+
+```bash
+python examples/xsens_tennis/generate_g1_xsens_usd.py \
+    --output-path demo_results/g1/models/g1_proportioned_xsens_with_offsets.usda \
+    --preserve-joint-offsets
+```
+
+Each command also writes a same-stem JSON report containing the raw G1 offsets, collapsed adapter offsets, applied
+spatial offsets, root anchors, independently measured target lengths, generated lengths, and validation residuals.
+The `g1_xsens` Viser mode changes only this static visual model: it applies the recording's global per-segment
+positions and orientations exactly, using the same pose path as the calibrated `xsens` mode, without runtime
+scaling or FK reconstruction.
+
+Use `viser_player.py --actor-mode robot` for the backward-compatible G1-only player. The motion-aware avatar modes
+are selected with `--actor-mode xsens`, `--actor-mode g1_xsens`, or `--actor-mode both`, and require
+`--xsens-hdf5`. The `both` mode additionally reads `--qpos-npz`; the Xsens timestamps are its master clock.
+
+To inspect the proportions directly, render the human-subject Xsens avatar, the generated G1-proportioned Xsens
+avatar, and the physical G1 side-by-side in the same Xsens T-pose:
+
+```bash
+python examples/xsens_tennis/compare_xsens_g1_tpose.py \
+    --hdf5-path demo_data/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02.hdf5
+```
+
+The script generates the human-subject avatar USD when `--calibrated-xsens-usd-path` is omitted, solves the physical
+G1 T-pose from the same recording, ground-aligns all three models independently, and opens a frontal Viser view.
+Pass `--preserve-joint-offsets` to compare the offset-preserving G1 Xsens variant instead.
+
 ### Calibrate and visualize the retargeted G1 T-pose
 
 The calibration follows the Xsens T-pose convention: arms and hands are horizontal, with both thumbs pointing

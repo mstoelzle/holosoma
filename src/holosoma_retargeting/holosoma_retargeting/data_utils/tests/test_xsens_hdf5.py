@@ -121,6 +121,31 @@ def test_loader_uses_segment_names_body_metadata_and_drops_sword_segment(tmp_pat
     assert not np.any(motion.positions_m == 999.0)
 
 
+def test_loader_can_include_tracked_racket_pose_without_changing_default(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_racket.hdf5"
+    times_s = np.arange(2, dtype=float) / 60.0
+    segment_names = [name.replace(" ", "") for name in XSENS_BODY_SEGMENT_NAMES] + ["RightHandSword"]
+    positions_m = np.zeros((2, len(segment_names), 3), dtype=float)
+    positions_m[:, -1] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, segment_names)
+        _write_identity_orientations(hdf5_file, times_s, segment_names)
+
+    body_only = load_xsens_hdf5_motion(hdf5_path, target_fps=None)
+    with_racket = load_xsens_hdf5_motion(
+        hdf5_path,
+        target_fps=None,
+        include_tracked_props=True,
+    )
+
+    assert body_only.positions_m.shape[1] == 23
+    assert with_racket.positions_m.shape[1] == 24
+    assert with_racket.segment_names[-1] == "RightHandSword"
+    assert with_racket.source_indices[-1] == 23
+    np.testing.assert_allclose(with_racket.positions_m[:, -1], positions_m[:, -1])
+
+
 def test_loader_falls_back_to_cm_stream_without_headings(tmp_path) -> None:
     hdf5_path = tmp_path / "xsens_sample.h5"
     times_s = np.arange(3, dtype=float) / 30.0
