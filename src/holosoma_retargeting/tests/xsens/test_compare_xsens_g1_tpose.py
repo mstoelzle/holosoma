@@ -1,8 +1,9 @@
+"""Tests for Xsens and G1 T-pose comparison."""
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
-
 from holosoma_retargeting.examples.xsens_tennis.compare_xsens_g1_tpose import (
     side_by_side_offsets,
     tree_vertical_bounds,

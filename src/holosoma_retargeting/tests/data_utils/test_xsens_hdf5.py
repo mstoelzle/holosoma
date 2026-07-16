@@ -1,9 +1,12 @@
+"""Tests for Xsens HDF5 data utilities."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
 
 import h5py
 import numpy as np
+import pytest
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
@@ -243,12 +246,8 @@ def test_motion_loader_requires_orientations(tmp_path) -> None:
     with h5py.File(hdf5_path, "w") as hdf5_file:
         _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
 
-    try:
+    with pytest.raises(KeyError, match="body_orientation_quaternion_wijk"):
         load_xsens_hdf5_motion(hdf5_path, target_fps=30.0)
-    except KeyError as exc:
-        assert "body_orientation_quaternion_wijk" in str(exc)
-    else:
-        raise AssertionError("Expected a KeyError for missing dynamic Xsens orientations")
 
 
 def test_resolve_xsens_hdf5_path_accepts_task_stems_and_explicit_files(tmp_path) -> None:
@@ -291,12 +290,8 @@ def test_tpose_loader_errors_on_missing_variant(tmp_path) -> None:
     with h5py.File(hdf5_path, "w") as hdf5_file:
         hdf5_file.create_group("xsens-segments-tpose")
 
-    try:
+    with pytest.raises(KeyError, match="body_position_Tpose_xyz_m"):
         load_xsens_hdf5_tpose(hdf5_path, variant="Tpose")
-    except KeyError as exc:
-        assert "body_position_Tpose_xyz_m" in str(exc)
-    else:
-        raise AssertionError("Expected a KeyError for missing T-pose datasets")
 
 
 def test_calibration_loader_preserves_complete_source_schema(tmp_path) -> None:

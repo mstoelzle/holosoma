@@ -1,3 +1,5 @@
+"""Tests for G1 kinematic reduction."""
+
 from __future__ import annotations
 
 import inspect
@@ -6,7 +8,6 @@ import json
 import mujoco
 import numpy as np
 import pytest
-
 from holosoma_retargeting.kinematics import (
     KinematicPose,
     compute_reference_joint_positions,

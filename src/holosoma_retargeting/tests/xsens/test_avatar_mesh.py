@@ -1,10 +1,11 @@
+"""Tests for Xsens avatar mesh construction."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import replace
 
 import numpy as np
-
 from holosoma_retargeting.kinematics.model import rotate_vector
 from holosoma_retargeting.xsens.avatar_mesh import (
     build_tennis_racket_meshes,

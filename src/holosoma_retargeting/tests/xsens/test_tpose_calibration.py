@@ -1,33 +1,40 @@
+"""Tests for Xsens T-pose calibration."""
+
 from __future__ import annotations
+
+from pathlib import Path
 
 import mujoco
 import numpy as np
-from scipy.spatial.transform import Rotation
-
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.task import TaskConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Tpose
 from holosoma_retargeting.examples.robot_retarget import create_task_constants
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
-from holosoma_retargeting.xsens.tpose_calibration import (
-    CALIBRATION_POSITION_MAPPING,
-    XsensTposeCalibrationConfig,
-    align_and_scale_tpose_targets,
-    axis_alignment_error_deg,
-    compute_canonical_axes,
-    evaluate_head_candidate,
-    limb_axis_error_deg,
-    solve_xsens_tpose_calibration_from_data,
-    symmetry_residual,
-    elbow_bend_angle_deg,
-)
 from holosoma_retargeting.xsens.orientation_tracking import (
     XSENS_AXIS_SPECS,
     build_xsens_axis_calibration_metadata,
     load_xsens_orientation_targets,
     matrix_to_quat_wijk,
 )
+from holosoma_retargeting.xsens.tpose_calibration import (
+    CALIBRATION_POSITION_MAPPING,
+    XsensTposeCalibrationConfig,
+    align_and_scale_tpose_targets,
+    axis_alignment_error_deg,
+    compute_canonical_axes,
+    elbow_bend_angle_deg,
+    evaluate_head_candidate,
+    limb_axis_error_deg,
+    solve_xsens_tpose_calibration_from_data,
+    symmetry_residual,
+)
+from scipy.spatial.transform import Rotation
+
+import holosoma_retargeting
+
+MODEL_DIR = Path(holosoma_retargeting.__file__).parent / "models" / "g1"
 
 
 def _symmetric_tpose_positions() -> np.ndarray:
@@ -69,7 +76,10 @@ def test_align_and_scale_tpose_targets_ground_aligns_and_centers() -> None:
     aligned, axes = align_and_scale_tpose_targets(positions, scale_factor=2.0)
 
     np.testing.assert_allclose(aligned[XSENS_BODY_SEGMENT_NAMES.index("Pelvis"), :2], [0.0, 0.0])
-    foot_indices = [XSENS_BODY_SEGMENT_NAMES.index(name) for name in ("Left Foot", "Right Foot", "Left Toe", "Right Toe")]
+    foot_indices = [
+        XSENS_BODY_SEGMENT_NAMES.index(name)
+        for name in ("Left Foot", "Right Foot", "Left Toe", "Right Toe")
+    ]
     assert np.min(aligned[foot_indices, 2]) == 0.0
     np.testing.assert_allclose(np.cross(axes[0], axes[1]), axes[2], atol=1e-8)
     assert axes[2, 2] > 0.0
@@ -169,12 +179,16 @@ def test_orientation_targets_reconstruct_from_dynamic_orientation_and_saved_offs
 
     assert targets.orientation_names == ["L5"]
     assert targets.orientation_robot_link_names == ["torso_link"]
-    np.testing.assert_allclose(targets.orientation_target_rotations[0, 0], dynamic_rotation @ offset_rotation, atol=1e-12)
+    np.testing.assert_allclose(
+        targets.orientation_target_rotations[0, 0],
+        dynamic_rotation @ offset_rotation,
+        atol=1e-12,
+    )
     assert targets.axis_target_vectors.shape == (2, len(XSENS_AXIS_SPECS), 3)
 
 
 def test_orientation_tracking_jacobians_match_finite_difference() -> None:
-    robot_urdf = "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.urdf"
+    robot_urdf = str(MODEL_DIR / "g1_29dof.urdf")
     constants = create_task_constants(
         robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
         motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
@@ -240,9 +254,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     assert result.axis_local_tpose_xyz.shape == (len(XSENS_AXIS_SPECS), 3)
     assert result.position_offsets_robot_minus_xsens_m.shape == (len(CALIBRATION_POSITION_MAPPING), 3)
 
-    model = mujoco.MjModel.from_xml_path(
-        "src/holosoma_retargeting/holosoma_retargeting/models/g1/g1_29dof.xml"
-    )
+    model = mujoco.MjModel.from_xml_path(str(MODEL_DIR / "g1_29dof.xml"))
     data = mujoco.MjData(model)
     data.qpos[:] = result.qpos[0]
     mujoco.mj_forward(model, data)

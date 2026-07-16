@@ -1,3 +1,5 @@
+"""Tests for Xsens-to-USD conversion."""
+
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -11,9 +13,10 @@ pytest.importorskip("pxr")
 
 from holosoma_retargeting.data_utils.xsens_hdf5 import SegmentPoseSet, XsensHdf5Calibration
 from holosoma_retargeting.usd import open_usd_stage, read_kinematic_tree_from_stage
-from holosoma_retargeting.xsens.tests.test_avatar_mesh import _write_avatar_hdf5
-from holosoma_retargeting.xsens.tests.test_kinematic_model import synthetic_calibration
 from holosoma_retargeting.xsens.usd_conversion import convert_xsens_hdf5_to_usd
+
+from .test_avatar_mesh import _write_avatar_hdf5
+from .test_kinematic_model import synthetic_calibration
 
 
 def _write_hdf5(path, calibration: XsensHdf5Calibration) -> None:

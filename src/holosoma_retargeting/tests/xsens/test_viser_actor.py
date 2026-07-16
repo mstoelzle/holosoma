@@ -1,10 +1,11 @@
+"""Tests for the Xsens Viser actor."""
+
 from __future__ import annotations
 
 from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
-
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
     XsensHdf5Motion,

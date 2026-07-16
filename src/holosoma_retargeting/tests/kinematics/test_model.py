@@ -1,7 +1,8 @@
+"""Tests for the shared kinematic model."""
+
 from __future__ import annotations
 
 import numpy as np
-
 from holosoma_retargeting.kinematics import (
     KinematicTree,
     RigidBodyDefinition,

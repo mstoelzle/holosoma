@@ -1,11 +1,11 @@
+"""Tests for USD kinematic model conversion."""
+
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
 pytest.importorskip("pxr")
-from pxr import UsdShade
-
 from holosoma_retargeting.kinematics import (
     KinematicTree,
     MeshAttachment,
@@ -20,6 +20,7 @@ from holosoma_retargeting.usd import (
     validate_usd_kinematic_tree,
     write_kinematic_tree_to_stage,
 )
+from pxr import UsdShade
 
 
 def _model() -> KinematicTree:

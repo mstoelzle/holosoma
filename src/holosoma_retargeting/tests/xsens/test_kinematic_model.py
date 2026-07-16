@@ -1,9 +1,10 @@
+"""Tests for the Xsens kinematic model."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
 import numpy as np
-
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     JointRotationMetadata,
     SegmentPoseSet,
