@@ -5,18 +5,54 @@ import pytest
 from holosoma_retargeting.config_types.viser import ViserConfig, XsensViserConfig
 from holosoma_retargeting.config_values.viser import get_default_xsens_viser_config
 from holosoma_retargeting.src.viser_utils import resolve_frame_times
-from holosoma_retargeting.viser_player import compute_ground_plane_bounds
+from holosoma_retargeting.viser_player import (
+    compute_ground_plane_bounds,
+    resolve_actor_modes,
+    resolve_xsens_actor_offsets,
+)
 
 
 def test_xsens_options_are_not_part_of_global_viser_config() -> None:
     base = ViserConfig()
-    xsens = XsensViserConfig(actor_mode="g1_xsens", xsens_hdf5="motion.hdf5")
+    xsens = XsensViserConfig(actor_modes=("xsens", "g1_xsens"), xsens_hdf5="motion.hdf5")
 
-    assert not hasattr(base, "actor_mode")
+    assert not hasattr(base, "actor_modes")
     assert not hasattr(base, "xsens_hdf5")
-    assert xsens.actor_mode == "g1_xsens"
+    assert xsens.actor_modes == ("xsens", "g1_xsens")
     assert xsens.xsens_hdf5 == "motion.hdf5"
     assert isinstance(get_default_xsens_viser_config(), XsensViserConfig)
+
+
+def test_actor_modes_are_composable_unique_and_canonically_ordered() -> None:
+    assert resolve_actor_modes(("g1_xsens", "xsens", "g1_xsens")) == ("xsens", "g1_xsens")
+
+
+def test_all_actor_alias_expands_to_every_actor() -> None:
+    assert resolve_actor_modes(("all",)) == ("robot", "xsens", "g1_xsens")
+    assert resolve_actor_modes(("xsens", "all")) == ("robot", "xsens", "g1_xsens")
+
+
+def test_actor_modes_reject_empty_and_unknown_selections() -> None:
+    with pytest.raises(ValueError, match="at least one actor"):
+        resolve_actor_modes(())
+    with pytest.raises(ValueError, match="Unknown actor modes"):
+        resolve_actor_modes(("not_an_actor",))
+
+
+def test_g1_xsens_composition_offset_only_separates_the_paired_avatars() -> None:
+    single = resolve_xsens_actor_offsets(("g1_xsens",), (1.5, 0.0, 0.0))
+    paired = resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (1.5, -0.25, 0.0))
+
+    np.testing.assert_array_equal(single["g1_xsens"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(paired["xsens"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(paired["g1_xsens"], [1.5, -0.25, 0.0])
+
+
+def test_g1_xsens_composition_offset_requires_finite_xyz() -> None:
+    with pytest.raises(ValueError, match="three finite xyz"):
+        resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (1.0, 2.0))
+    with pytest.raises(ValueError, match="three finite xyz"):
+        resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (np.nan, 0.0, 0.0))
 
 
 def test_robot_ground_bounds_include_base_and_tracked_object() -> None:
@@ -66,6 +102,20 @@ def test_combined_ground_bounds_cover_both_data_sources() -> None:
     np.testing.assert_allclose(bounds.center_xy, [-1.5, -1.0])
     assert bounds.width == 18.0
     assert bounds.height == 11.0
+
+
+def test_ground_bounds_cover_composed_xsens_actor_offsets() -> None:
+    positions = np.array([[[0.0, 2.0, 1.0]], [[1.0, 4.0, 1.0]]])
+    combined_positions = np.concatenate(
+        [positions, positions + np.array([1.5, -0.5, 0.0])[None, None, :]],
+        axis=1,
+    )
+
+    bounds = compute_ground_plane_bounds(xsens_positions_m=combined_positions, padding_m=0.5)
+
+    np.testing.assert_allclose(bounds.center_xy, [1.25, 2.75])
+    assert bounds.width == 3.5
+    assert bounds.height == 3.5
 
 
 def test_explicit_grid_extents_act_only_as_minimums() -> None:

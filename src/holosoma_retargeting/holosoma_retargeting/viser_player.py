@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import tyro
@@ -33,9 +35,12 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
     sample_qpos_at_time,
 )
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
+    XsensKinematicPositionProjector,
     XsensMotionSampler,
     XsensUsdActor,
+    build_subject_xsens_reference_model,
     load_xsens_usd_model,
+    reference_grounding_offset_m,
     resolve_g1_xsens_usd,
     resolve_package_path,
     resolve_subject_xsens_usd,
@@ -58,6 +63,45 @@ def _nominal_fps(times_s: np.ndarray, fallback: float) -> float:
     intervals = np.diff(times)
     intervals = intervals[intervals > 0.0]
     return float(1.0 / np.median(intervals)) if intervals.size else float(fallback)
+
+
+ActorMode = Literal["robot", "xsens", "g1_xsens"]
+ACTOR_MODE_ORDER: tuple[ActorMode, ...] = ("robot", "xsens", "g1_xsens")
+
+
+def resolve_actor_modes(actor_modes: Sequence[str]) -> tuple[ActorMode, ...]:
+    """Expand aliases, validate actor modes, and return a stable unique ordering."""
+
+    requested = tuple(actor_modes)
+    if not requested:
+        raise ValueError("actor_modes must contain at least one actor")
+    allowed = {*ACTOR_MODE_ORDER, "all"}
+    unknown = sorted(set(requested) - allowed)
+    if unknown:
+        raise ValueError(f"Unknown actor modes: {unknown}. Expected values from {sorted(allowed)}")
+    if "all" in requested:
+        return ACTOR_MODE_ORDER
+    return tuple(mode for mode in ACTOR_MODE_ORDER if mode in requested)
+
+
+def resolve_xsens_actor_offsets(
+    actor_modes: Sequence[str],
+    g1_xsens_composition_offset_m: Sequence[float],
+) -> dict[ActorMode, np.ndarray]:
+    """Return visual root offsets while preserving each actor's local HDF5 poses."""
+
+    active_modes = resolve_actor_modes(actor_modes)
+    configured_offset = np.asarray(g1_xsens_composition_offset_m, dtype=float)
+    if configured_offset.shape != (3,) or not np.isfinite(configured_offset).all():
+        raise ValueError("g1_xsens_composition_offset_m must contain three finite xyz values")
+    offsets = {
+        mode: np.zeros(3, dtype=float)
+        for mode in active_modes
+        if mode in {"xsens", "g1_xsens"}
+    }
+    if "xsens" in offsets and "g1_xsens" in offsets:
+        offsets["g1_xsens"] = configured_offset
+    return offsets
 
 
 @dataclass(frozen=True)
@@ -129,18 +173,22 @@ def make_player(
     fps: int | None = None,
     xsens_motion: XsensHdf5Motion | None = None,
 ) -> viser.ViserServer:
-    """Create a Viser player for the configured actor mode."""
+    """Create a Viser player containing any configured combination of actors."""
 
     xsens_config = config if isinstance(config, XsensViserConfig) else None
-    actor_mode = xsens_config.actor_mode if xsens_config is not None else "robot"
-    show_robot = actor_mode in {"robot", "both"}
-    show_xsens = actor_mode in {"xsens", "g1_xsens", "both"}
+    actor_modes = resolve_actor_modes(xsens_config.actor_modes if xsens_config is not None else ("robot",))
+    show_robot = "robot" in actor_modes
+    show_xsens = "xsens" in actor_modes or "g1_xsens" in actor_modes
+    xsens_actor_offsets = resolve_xsens_actor_offsets(
+        actor_modes,
+        xsens_config.g1_xsens_composition_offset_m if xsens_config is not None else (0.0, 0.0, 0.0),
+    )
     if show_robot and qpos is None:
-        raise ValueError(f"actor_mode='{actor_mode}' requires qpos motion")
+        raise ValueError(f"actor_modes={actor_modes} requires qpos motion for the robot actor")
     if show_xsens and (
         xsens_config is None or xsens_motion is None or xsens_config.xsens_hdf5 is None
     ):
-        raise ValueError(f"actor_mode='{actor_mode}' requires an XsensViserConfig with --xsens-hdf5")
+        raise ValueError(f"actor_modes={actor_modes} requires an XsensViserConfig with --xsens-hdf5")
 
     server = viser.ViserServer()
 
@@ -183,32 +231,63 @@ def make_player(
             contains_object_in_qpos=config.assume_object_in_qpos,
         )
 
-    xsens_actor: XsensUsdActor | None = None
+    xsens_actors: dict[ActorMode, XsensUsdActor] = {}
     xsens_sampler: XsensMotionSampler | None = None
+    g1_xsens_projector: XsensKinematicPositionProjector | None = None
+    subject_reference_model = None
+    g1_grounding_offset_m = 0.0
     if show_xsens:
         assert xsens_config is not None and xsens_motion is not None and xsens_config.xsens_hdf5 is not None
         xsens_sampler = XsensMotionSampler(xsens_motion)
-        if actor_mode == "g1_xsens":
-            model_path = resolve_g1_xsens_usd(xsens_config.g1_xsens_usd)
-            model = load_xsens_usd_model(model_path)
-            validate_g1_xsens_usd(model)
-        else:
-            model_path = resolve_subject_xsens_usd(xsens_config.xsens_hdf5, xsens_config.xsens_usd)
-            model = load_xsens_usd_model(model_path)
-            validate_subject_xsens_usd(model, xsens_config.xsens_hdf5)
-        xsens_actor = XsensUsdActor(
-            server,
-            model_path,
-            model=model,
-            root_node_name="/xsens",
-            show_meshes=xsens_config.show_xsens_meshes,
-            show_landmarks=xsens_config.show_xsens_landmarks,
-        )
+        if "xsens" in actor_modes:
+            subject_model_path = resolve_subject_xsens_usd(xsens_config.xsens_hdf5, xsens_config.xsens_usd)
+            subject_model = load_xsens_usd_model(subject_model_path)
+            validate_subject_xsens_usd(subject_model, xsens_config.xsens_hdf5)
+            subject_reference_model = subject_model
+            xsens_actors["xsens"] = XsensUsdActor(
+                server,
+                subject_model_path,
+                model=subject_model,
+                root_node_name="/xsens",
+                show_meshes=xsens_config.show_xsens_meshes,
+                show_landmarks=xsens_config.show_xsens_landmarks,
+            )
+        if "g1_xsens" in actor_modes:
+            g1_model_path = resolve_g1_xsens_usd(xsens_config.g1_xsens_usd)
+            g1_model = load_xsens_usd_model(g1_model_path)
+            validate_g1_xsens_usd(g1_model)
+            if subject_reference_model is None:
+                subject_reference_model = build_subject_xsens_reference_model(xsens_config.xsens_hdf5)
+            g1_grounding_offset_m = reference_grounding_offset_m(subject_reference_model, g1_model)
+            xsens_actor_offsets["g1_xsens"][2] += g1_grounding_offset_m
+            xsens_actors["g1_xsens"] = XsensUsdActor(
+                server,
+                g1_model_path,
+                model=g1_model,
+                root_node_name="/g1_xsens",
+                show_meshes=xsens_config.show_xsens_meshes,
+                show_landmarks=xsens_config.show_xsens_landmarks,
+            )
+            g1_xsens_projector = XsensKinematicPositionProjector(
+                g1_model,
+                xsens_sampler.segment_names,
+            )
+        for mode, actor in xsens_actors.items():
+            actor.root.position = xsens_actor_offsets[mode]
 
     contains_object = bool(qpos is not None and robot_applier is not None and robot_applier.has_object_input(qpos))
+    xsens_ground_positions = None
+    if show_xsens and xsens_motion is not None:
+        xsens_ground_positions = np.concatenate(
+            [
+                xsens_motion.positions_m + xsens_actor_offsets[mode][None, None, :]
+                for mode in xsens_actors
+            ],
+            axis=1,
+        )
     ground = compute_ground_plane_bounds(
         qpos=qpos if show_robot else None,
-        xsens_positions_m=xsens_motion.positions_m if show_xsens and xsens_motion is not None else None,
+        xsens_positions_m=xsens_ground_positions,
         robot_dof=robot_dof,
         contains_object_in_qpos=contains_object,
         padding_m=config.grid_padding,
@@ -225,6 +304,10 @@ def make_player(
         f"[viser_player] ground center=({ground.center_xy[0]:.3f}, {ground.center_xy[1]:.3f}) | "
         f"extent=({ground.width:.3f}, {ground.height:.3f}) m"
     )
+    for mode, offset in xsens_actor_offsets.items():
+        print(f"[viser_player] {mode} root offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}) m")
+    if "g1_xsens" in xsens_actors:
+        print(f"[viser_player] g1_xsens grounding correction={g1_grounding_offset_m:.3f} m")
 
     with server.gui.add_folder("Display"):
         robot_meshes_cb = (
@@ -232,16 +315,17 @@ def make_player(
             if vr is not None
             else None
         )
-        xsens_meshes_cb = (
-            server.gui.add_checkbox("Show Xsens meshes", initial_value=xsens_config.show_xsens_meshes)
-            if xsens_actor is not None
-            else None
-        )
-        xsens_landmarks_cb = (
-            server.gui.add_checkbox("Show Xsens landmarks", initial_value=xsens_config.show_xsens_landmarks)
-            if xsens_actor is not None
-            else None
-        )
+        xsens_display_controls = {}
+        if xsens_config is not None:
+            for mode, actor in xsens_actors.items():
+                label = "Xsens" if mode == "xsens" else "G1-proportioned Xsens"
+                meshes_cb = server.gui.add_checkbox(
+                    f"Show {label} meshes", initial_value=xsens_config.show_xsens_meshes
+                )
+                landmarks_cb = server.gui.add_checkbox(
+                    f"Show {label} landmarks", initial_value=xsens_config.show_xsens_landmarks
+                )
+                xsens_display_controls[mode] = (actor, meshes_cb, landmarks_cb)
 
     if robot_meshes_cb is not None:
 
@@ -252,21 +336,17 @@ def make_player(
             if vo is not None:
                 vo.show_visual = bool(robot_meshes_cb.value)
 
-    if xsens_meshes_cb is not None:
+    for actor, meshes_cb, landmarks_cb in xsens_display_controls.values():
 
-        @xsens_meshes_cb.on_update
-        def _(_evt) -> None:
-            assert xsens_actor is not None
-            xsens_actor.set_mesh_visibility(bool(xsens_meshes_cb.value))
+        @meshes_cb.on_update
+        def _(_evt, actor=actor, checkbox=meshes_cb) -> None:
+            actor.set_mesh_visibility(bool(checkbox.value))
 
-    if xsens_landmarks_cb is not None:
+        @landmarks_cb.on_update
+        def _(_evt, actor=actor, checkbox=landmarks_cb) -> None:
+            actor.set_landmark_visibility(bool(checkbox.value))
 
-        @xsens_landmarks_cb.on_update
-        def _(_evt) -> None:
-            assert xsens_actor is not None
-            xsens_actor.set_landmark_visibility(bool(xsens_landmarks_cb.value))
-
-    if actor_mode == "robot":
+    if not show_xsens:
         assert qpos is not None and vr is not None and robot_root is not None and robot_applier is not None
         print(f"[viser_player] mode=robot | {qpos.shape[0]} frames | robot_dof={robot_dof}")
         if config.record_video:
@@ -309,9 +389,9 @@ def make_player(
         )
         return server
 
-    assert xsens_sampler is not None and xsens_actor is not None
+    assert xsens_sampler is not None and xsens_actors
     master_times = xsens_sampler.times_s.copy()
-    if actor_mode == "both":
+    if show_robot:
         assert qpos is not None and robot_applier is not None
         robot_duration_s = max(0.0, (int(qpos.shape[0]) - 1) / actual_robot_fps)
         common_duration_s = min(xsens_sampler.duration_s, robot_duration_s)
@@ -321,12 +401,20 @@ def make_player(
 
     def _apply_time(time_s: float) -> None:
         xsens_pose = xsens_sampler.sample(time_s)
-        xsens_actor.apply_pose(
-            xsens_sampler.segment_names,
-            xsens_pose.positions_m,
-            xsens_pose.quaternions_wxyz,
-        )
-        if actor_mode == "both":
+        for mode, actor in xsens_actors.items():
+            actor_positions = xsens_pose.positions_m
+            if mode == "g1_xsens":
+                assert g1_xsens_projector is not None
+                actor_positions = g1_xsens_projector.project(
+                    xsens_pose.positions_m,
+                    xsens_pose.quaternions_wxyz,
+                )
+            actor.apply_pose(
+                xsens_sampler.segment_names,
+                actor_positions,
+                xsens_pose.quaternions_wxyz,
+            )
+        if show_robot:
             assert qpos is not None and robot_applier is not None
             has_object = robot_applier.has_object_input(qpos)
             sampled_qpos = sample_qpos_at_time(
@@ -340,7 +428,7 @@ def make_player(
 
     playback_fps = _nominal_fps(master_times, config.fps)
     print(
-        f"[viser_player] mode={actor_mode} | {master_times.size} master frames | "
+        f"[viser_player] actors={','.join(actor_modes)} | {master_times.size} master frames | "
         f"duration={master_times[-1]:.3f}s | nominal_fps={playback_fps:.3f}"
     )
     if config.record_video:
@@ -379,14 +467,15 @@ def make_player(
 
 
 def main(cfg: XsensViserConfig) -> None:
+    actor_modes = resolve_actor_modes(cfg.actor_modes)
     qpos: np.ndarray | None = None
     fps: int | None = None
     xsens_motion: XsensHdf5Motion | None = None
-    if cfg.actor_mode in {"robot", "both"}:
+    if "robot" in actor_modes:
         qpos, fps = load_npz(cfg.qpos_npz)
-    if cfg.actor_mode in {"xsens", "g1_xsens", "both"}:
+    if "xsens" in actor_modes or "g1_xsens" in actor_modes:
         if cfg.xsens_hdf5 is None:
-            raise ValueError(f"actor_mode='{cfg.actor_mode}' requires --xsens-hdf5")
+            raise ValueError(f"actor_modes={actor_modes} requires --xsens-hdf5")
         xsens_motion = load_xsens_hdf5_motion(
             resolve_package_path(cfg.xsens_hdf5),
             target_fps=cfg.xsens_target_fps,

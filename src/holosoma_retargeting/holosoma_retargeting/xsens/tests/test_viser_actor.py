@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,13 +9,24 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
     XsensHdf5Motion,
 )
-from holosoma_retargeting.kinematics import KinematicTree, MeshAttachment, RigidBodyDefinition, Transform
+from holosoma_retargeting.kinematics import (
+    KinematicTree,
+    MeshAttachment,
+    RigidBodyDefinition,
+    SphericalJointDefinition,
+    Transform,
+    compute_joint_positions,
+)
 from holosoma_retargeting.src.viser_utils import sample_qpos_at_time
 from holosoma_retargeting.src.xsens_viser import (
+    XsensKinematicPositionProjector,
     XsensMotionSampler,
     XsensUsdActor,
+    reference_grounding_offset_m,
+    reference_root_floor_clearance_m,
     validate_g1_xsens_usd,
 )
+from holosoma_retargeting.xsens.g1_kinematic_reduction import G1_XSENS_REDUCTION_VERSION
 
 
 class _Handle:
@@ -78,7 +90,7 @@ def _model(mesh_scale: float) -> KinematicTree:
     )
 
 
-def test_xsens_and_g1_visual_models_receive_identical_global_poses() -> None:
+def test_actor_direct_pose_application_is_independent_of_visual_proportions() -> None:
     subject_server = SimpleNamespace(scene=_Scene())
     g1_server = SimpleNamespace(scene=_Scene())
     subject = XsensUsdActor(subject_server, "subject.usda", model=_model(1.0))
@@ -96,6 +108,89 @@ def test_xsens_and_g1_visual_models_receive_identical_global_poses() -> None:
         np.testing.assert_array_equal(g1.body_frames[body_name].position, positions[position_index])
         np.testing.assert_array_equal(subject.body_frames[body_name].wxyz, g1.body_frames[body_name].wxyz)
     assert not np.array_equal(subject.mesh_handles[0].vertices, g1.mesh_handles[0].vertices)
+
+
+def _two_segment_model() -> KinematicTree:
+    bodies = (
+        RigidBodyDefinition(
+            "Pelvis",
+            Transform(np.array([0.0, 0.0, 1.0])),
+            metadata={"xsens:sourceSegmentName": "Pelvis"},
+        ),
+        RigidBodyDefinition(
+            "Child",
+            Transform(np.array([0.0, 0.0, 2.0])),
+            metadata={"xsens:sourceSegmentName": "Child"},
+        ),
+    )
+    joint = SphericalJointDefinition(
+        "Joint",
+        parent_body="Pelvis",
+        child_body="Child",
+        parent_frame=Transform(np.array([0.0, 0.0, 0.5])),
+        child_frame=Transform(np.array([0.0, 0.0, -0.5])),
+    )
+    return KinematicTree("two_segment", "Pelvis", bodies, (joint,))
+
+
+def test_kinematic_projector_matches_authored_reference_pose() -> None:
+    model = _two_segment_model()
+    projector = XsensKinematicPositionProjector(model, ("Pelvis", "Child"))
+    positions = np.array([body.reference_pose.translation_m for body in model.bodies])
+    orientations = np.array([body.reference_pose.rotation_wxyz for body in model.bodies])
+
+    projected = projector.project(positions, orientations)
+
+    np.testing.assert_allclose(projected, positions)
+
+
+def test_kinematic_projector_uses_model_lengths_and_preserves_root() -> None:
+    model = _two_segment_model()
+    projector = XsensKinematicPositionProjector(model, ("Pelvis", "Child"))
+    human_positions = np.array([[10.0, 20.0, 30.0], [10.0, 20.0, 33.0]])
+    orientations = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
+
+    projected = projector.project(human_positions, orientations)
+
+    np.testing.assert_array_equal(projected[0], human_positions[0])
+    poses = {
+        body.name: Transform(projected[index], orientations[index])
+        for index, body in enumerate(model.bodies)
+    }
+    joint_positions = compute_joint_positions(model, poses)
+    parent_joint_position = projected[0] + np.array([0.0, 0.0, 0.5])
+    np.testing.assert_allclose(joint_positions["Joint"], parent_joint_position)
+    assert not np.array_equal(projected[1], human_positions[1])
+
+
+def test_reference_grounding_offset_aligns_models_with_different_leg_lengths() -> None:
+    floor_mesh = MeshAttachment(
+        name="floor",
+        vertices_m=np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0]]),
+        faces=np.array([[0, 1, 2]]),
+    )
+    source = KinematicTree(
+        "source",
+        "Pelvis",
+        (
+            RigidBodyDefinition("Pelvis", Transform(np.array([0.0, 0.0, 1.0]))),
+            RigidBodyDefinition("Foot", Transform.identity(), meshes=(floor_mesh,)),
+        ),
+        (),
+    )
+    target = KinematicTree(
+        "target",
+        "Pelvis",
+        (
+            RigidBodyDefinition("Pelvis", Transform(np.array([0.0, 0.0, 0.75]))),
+            RigidBodyDefinition("Foot", Transform.identity(), meshes=(floor_mesh,)),
+        ),
+        (),
+    )
+
+    assert reference_root_floor_clearance_m(source) == 1.0
+    assert reference_root_floor_clearance_m(target) == 0.75
+    assert reference_grounding_offset_m(source, target) == -0.25
 
 
 def test_motion_sampler_uses_timestamps_and_shortest_arc_slerp() -> None:
@@ -151,7 +246,17 @@ def test_g1_validation_requires_all_body_and_racket_mappings() -> None:
         "Pelvis",
         bodies,
         (),
-        metadata={"model:proportionedFrom": "g1_29dof"},
+        metadata={
+            "model:proportionedFrom": "g1_29dof",
+            "model:generatorVersion": G1_XSENS_REDUCTION_VERSION,
+        },
     )
 
     validate_g1_xsens_usd(model)
+
+    stale_model = replace(
+        model,
+        metadata={**model.metadata, "model:generatorVersion": "stale"},
+    )
+    with np.testing.assert_raises_regex(ValueError, "incompatible model generator"):
+        validate_g1_xsens_usd(stale_model)

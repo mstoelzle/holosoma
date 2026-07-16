@@ -140,13 +140,25 @@ python examples/xsens_tennis/generate_g1_xsens_usd.py \
 
 Each command also writes a same-stem JSON report containing the raw G1 offsets, collapsed adapter offsets, applied
 spatial offsets, root anchors, independently measured target lengths, generated lengths, and validation residuals.
-The `g1_xsens` Viser mode changes only this static visual model: it applies the recording's global per-segment
-positions and orientations exactly, using the same pose path as the calibrated `xsens` mode, without runtime
-scaling or FK reconstruction.
+The `g1_xsens` Viser mode preserves the recording's pelvis trajectory and global segment orientations, then
+reconstructs connected body origins from the G1-Xsens model's authored joint anchors. This carries the recorded
+joint motion onto the G1 proportions without runtime mesh scaling. The calibrated `xsens` mode continues to apply
+the recording's global segment positions and orientations directly.
 
-Use `viser_player.py --actor-mode robot` for the backward-compatible G1-only player. The motion-aware avatar modes
-are selected with `--actor-mode xsens`, `--actor-mode g1_xsens`, or `--actor-mode both`, and require
-`--xsens-hdf5`. The `both` mode additionally reads `--qpos-npz`; the Xsens timestamps are its master clock.
+The G1-Xsens root also receives a constant vertical correction derived from the calibrated subject and G1-Xsens
+reference meshes. This preserves the recording's vertical motion while compensating for their different
+pelvis-to-floor distances, rather than forcing the feet onto the floor independently on every frame.
+
+Use `viser_player.py --actor-modes robot` for the backward-compatible G1-only player. Actor modes compose freely;
+for example, `--actor-modes xsens g1_xsens` renders both avatar proportions from the same HDF5 motion, while
+`--actor-modes robot xsens` adds the physical G1. The `--actor-modes all` alias expands to `robot xsens g1_xsens`.
+Any selection containing `xsens` or `g1_xsens` requires `--xsens-hdf5`; a selection containing `robot` also reads
+`--qpos-npz`. When data sources are combined, the Xsens timestamps are the master clock.
+
+Because the two Xsens variants share the same pelvis trajectory, composing them would otherwise overlap. When
+both are selected, the player therefore shifts the `g1_xsens` scene root by `(1.5, 0, 0)` metres for comparison.
+Override this with, for example, `--g1-xsens-composition-offset-m 0 2 0`; use `0 0 0` to compare the two skeletons
+around the same recorded pelvis position.
 
 To inspect the proportions directly, render the human-subject Xsens avatar, the generated G1-proportioned Xsens
 avatar, and the physical G1 side-by-side in the same Xsens T-pose:

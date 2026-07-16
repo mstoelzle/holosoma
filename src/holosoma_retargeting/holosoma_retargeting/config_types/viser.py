@@ -106,17 +106,20 @@ class ViserConfig:
 class XsensViserConfig(ViserConfig):
     """Viser configuration for Xsens and combined robot/Xsens playback."""
 
-    actor_mode: Literal["robot", "xsens", "g1_xsens", "both"] = "robot"
-    """Actors to display. ``both`` means the G1 robot and calibrated Xsens avatar."""
+    actor_modes: tuple[Literal["robot", "xsens", "g1_xsens", "all"], ...] = ("robot",)
+    """Actors to compose in one scene. ``all`` expands to all three actor types."""
 
     xsens_hdf5: str | None = None
-    """Xsens HDF5 motion used by xsens, g1_xsens, and both modes."""
+    """Xsens HDF5 motion shared by the xsens and g1_xsens actors."""
 
     xsens_usd: str | None = None
     """Recording-specific Xsens USDA override; defaults to the HDF5 sibling model."""
 
     g1_xsens_usd: str | None = None
     """G1-proportioned Xsens USDA override; defaults to the packaged demo result."""
+
+    g1_xsens_composition_offset_m: tuple[float, float, float] = (1.5, 0.0, 0.0)
+    """Root xyz offset applied to g1_xsens when both Xsens avatar variants are shown."""
 
     xsens_target_fps: float | None = None
     """Optional HDF5 pre-sampling rate. None preserves the native timestamps."""
