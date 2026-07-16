@@ -217,15 +217,17 @@ def _sole_model(*, pelvis_z: float = 1.0, sole_body_z: float = 0.05) -> Kinemati
             metadata={"xsens:sourceSegmentName": "Pelvis"},
         )
     ]
-    for body_name in _SOLE_SEGMENT_NAMES[1:]:
-        bodies.append(
+    bodies.extend(
+        [
             RigidBodyDefinition(
                 body_name,
                 Transform(np.array([0.0, 0.0, sole_body_z])),
                 meshes=(outsole,),
                 metadata={"xsens:sourceSegmentName": body_name},
             )
-        )
+            for body_name in _SOLE_SEGMENT_NAMES[1:]
+        ]
+    )
     return KinematicTree("sole_model", "Pelvis", tuple(bodies), ())
 
 

@@ -145,9 +145,11 @@ reconstructs connected body origins from the G1-Xsens model's authored joint anc
 joint motion onto the G1 proportions without runtime mesh scaling. The calibrated `xsens` mode continues to apply
 the recording's global segment positions and orientations directly.
 
-The G1-Xsens root also receives a constant vertical correction derived from the calibrated subject and G1-Xsens
-reference meshes. This preserves the recording's vertical motion while compensating for their different
-pelvis-to-floor distances, rather than forcing the feet onto the floor independently on every frame.
+The G1-Xsens root receives a pose-dependent vertical correction derived from the calibrated subject and G1-Xsens
+outsole meshes. At every sampled pose, the player aligns the lowest rendered G1 sole with the lowest rendered
+subject sole after reconstructing the G1 body origins. This handles changing leg-length projections as the knees
+bend while preserving the subject's measured airborne foot clearance without jump-height scaling or ground
+clamping.
 
 Use `viser_player.py --actor-modes robot` for the backward-compatible G1-only player. Actor modes compose freely;
 for example, `--actor-modes xsens g1_xsens` renders both avatar proportions from the same HDF5 motion, while
