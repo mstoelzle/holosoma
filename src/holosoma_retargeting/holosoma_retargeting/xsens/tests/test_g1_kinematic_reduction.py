@@ -114,11 +114,79 @@ def test_preserved_offsets_appear_once_without_changing_rigid_lengths(
     for name, value in _rigid_lengths(preserved).items():
         np.testing.assert_allclose(value, anthropometry.lengths_m[name], atol=1e-12)
 
-    for body_name in ("LeftUpperArm", "LeftForeArm", "LeftUpperLeg", "LeftLowerLeg"):
+    for body_name in ("LeftUpperArm", "LeftUpperLeg", "LeftLowerLeg"):
         collapsed_mesh = collapsed_bodies[body_name].meshes[0]
         preserved_mesh = preserved_bodies[body_name].meshes[0]
         np.testing.assert_allclose(collapsed_mesh.vertices_m, preserved_mesh.vertices_m)
         np.testing.assert_array_equal(collapsed_mesh.faces, preserved_mesh.faces)
+
+    collapsed_forearm = collapsed_bodies["LeftForeArm"].meshes[0]
+    preserved_forearm = preserved_bodies["LeftForeArm"].meshes[0]
+    np.testing.assert_array_equal(collapsed_forearm.faces, preserved_forearm.faces)
+    np.testing.assert_allclose(
+        np.ptp(preserved_forearm.vertices_m, axis=0)[[0, 2]],
+        np.ptp(collapsed_forearm.vertices_m, axis=0)[[0, 2]],
+    )
+    assert np.ptp(preserved_forearm.vertices_m, axis=0)[1] > np.ptp(collapsed_forearm.vertices_m, axis=0)[1]
+    for title, sign in (("Left", 1.0), ("Right", -1.0)):
+        forearm = preserved_bodies[f"{title}ForeArm"]
+        hand = preserved_bodies[f"{title}Hand"]
+        vertices = np.vstack([mesh.vertices_m for mesh in forearm.meshes])
+        visual_edge_y = vertices[:, 1].max() if sign > 0.0 else vertices[:, 1].min()
+        hand_origin_y = hand.reference_pose.translation_m[1] - forearm.reference_pose.translation_m[1]
+        seam_width = sign * (hand_origin_y - visual_edge_y)
+        assert 0.0 <= seam_width < 0.01
+
+
+def test_preserved_compound_edges_use_region_specific_canonical_frames(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(preserve_joint_offsets=True, include_visuals=False),
+    )
+    bodies = model.body_map()
+    joints = compute_reference_joint_positions(model)
+    pelvis = bodies["Pelvis"].reference_pose.translation_m
+
+    for side, title, sign in (("left", "Left", 1.0), ("right", "Right", -1.0)):
+        shoulder_path_length = sum(
+            np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
+        )
+        wrist_path_length = sum(np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_wrist"])
+        shoulder_offset = (
+            bodies[f"{title}UpperArm"].reference_pose.translation_m
+            - bodies[f"{title}Shoulder"].reference_pose.translation_m
+        )
+        wrist_offset = bodies[f"{title}Hand"].reference_pose.translation_m - joints[f"{title}Wrist"]
+        hip_root = pelvis + anthropometry.root_anchors_m[f"{side}_hip"]
+        hip_offset = bodies[f"{title}UpperLeg"].reference_pose.translation_m - hip_root
+        ankle_offset = bodies[f"{title}Foot"].reference_pose.translation_m - joints[f"{title}Ankle"]
+
+        np.testing.assert_allclose(shoulder_offset, [0.0, sign * shoulder_path_length, 0.0], atol=1e-12)
+        np.testing.assert_allclose(wrist_offset, [0.0, sign * wrist_path_length, 0.0], atol=1e-12)
+        np.testing.assert_allclose(hip_offset, anthropometry.compound_offsets_m[f"{side}_hip"], atol=1e-12)
+        assert abs(float(ankle_offset[0])) < 1e-10
+        assert abs(float(ankle_offset[1])) < 1e-5
+        np.testing.assert_allclose(
+            np.linalg.norm(ankle_offset),
+            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_ankle"]),
+            atol=1e-12,
+        )
+        assert ankle_offset[2] < 0.0
+
+
+def test_raw_compound_edges_are_parent_local_and_configuration_independent(
+    anthropometry: G1Anthropometry,
+) -> None:
+    assert len(anthropometry.compound_offset_edges_m["left_shoulder"]) == 2
+    assert len(anthropometry.compound_offset_edges_m["left_wrist"]) == 2
+    assert len(anthropometry.compound_offset_edges_m["left_hip"]) == 2
+    assert len(anthropometry.compound_offset_edges_m["left_ankle"]) == 1
+    assert len(anthropometry.compound_offset_edges_m["waist"]) == 2
+    np.testing.assert_allclose(anthropometry.compound_offset_edges_m["left_wrist"][0], [0.038, 0.0, 0.0])
+    np.testing.assert_allclose(anthropometry.compound_offset_edges_m["left_wrist"][1], [0.046, 0.0, 0.0])
+    np.testing.assert_allclose(anthropometry.compound_offset_edges_m["left_ankle"][0], [0.0, 0.0, -0.017558])
 
 
 def test_shared_pelvis_and_upper_leg_visuals_cover_g1_waist_and_hip_spans(
@@ -250,6 +318,8 @@ def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_pat
     assert report.max_joint_residual_m < 5e-6
     assert payload["preserve_joint_offsets"] is False
     assert any(np.linalg.norm(value) > 0.0 for value in payload["raw_offsets_m"].values())
+    assert payload["raw_offset_edge_frame"] == "parent_body_local"
+    assert len(payload["raw_offset_edges_m"]["left_wrist"]) == 2
     assert np.linalg.norm(payload["root_anchors_m"]["left_hip"]) > 0.0
     assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_hip"]) > 0.0
     assert all(np.linalg.norm(value) == 0.0 for value in payload["applied_offsets_m"].values())

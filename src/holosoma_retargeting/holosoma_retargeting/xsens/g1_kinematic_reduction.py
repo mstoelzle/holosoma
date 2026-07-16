@@ -35,7 +35,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "5"
+G1_XSENS_REDUCTION_VERSION = "6"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -62,6 +62,7 @@ class G1Anthropometry:
     widths_m: Mapping[str, float]
     root_anchors_m: Mapping[str, np.ndarray]
     compound_offsets_m: Mapping[str, np.ndarray]
+    compound_offset_edges_m: Mapping[str, tuple[np.ndarray, ...]]
     span_vectors_m: Mapping[str, np.ndarray]
     region_extents_m: Mapping[str, np.ndarray]
     region_centers_m: Mapping[str, np.ndarray]
@@ -84,6 +85,7 @@ class G1XsensProportionReport:
     widths_m: Mapping[str, float]
     root_anchors_m: Mapping[str, tuple[float, float, float]]
     raw_offsets_m: Mapping[str, tuple[float, float, float]]
+    raw_offset_edges_m: Mapping[str, tuple[tuple[float, float, float], ...]]
     collapsed_adapter_offsets_m: Mapping[str, tuple[float, float, float]]
     applied_offsets_m: Mapping[str, tuple[float, float, float]]
     max_length_error_m: float
@@ -105,6 +107,10 @@ class G1XsensProportionReport:
             "widths_m": dict(self.widths_m),
             "root_anchors_m": {name: list(value) for name, value in self.root_anchors_m.items()},
             "raw_offsets_m": {name: list(value) for name, value in self.raw_offsets_m.items()},
+            "raw_offset_edge_frame": "parent_body_local",
+            "raw_offset_edges_m": {
+                name: [list(edge) for edge in edges] for name, edges in self.raw_offset_edges_m.items()
+            },
             "collapsed_adapter_offsets_m": {
                 name: list(value) for name, value in self.collapsed_adapter_offsets_m.items()
             },
@@ -193,6 +199,13 @@ def _body_point(
     return body_positions[_named_id(model, mujoco.mjtObj.mjOBJ_BODY, name)].copy()
 
 
+def _local_body_translation(model: mujoco.MjModel, name: str) -> np.ndarray:
+    """Return a fixed child-body translation expressed in its parent body frame."""
+
+    body_id = _named_id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+    return np.asarray(model.body_pos[body_id], dtype=float).copy()
+
+
 def _geom_mesh_points(
     model: mujoco.MjModel,
     body_positions: np.ndarray,
@@ -266,6 +279,7 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
     side_lengths: dict[str, float] = {}
     root_anchors: dict[str, np.ndarray] = {}
     offsets: dict[str, np.ndarray] = {}
+    offset_edges: dict[str, tuple[np.ndarray, ...]] = {}
     spans: dict[str, np.ndarray] = {}
     radii_by_side: dict[str, np.ndarray] = {}
     for side in ("left", "right"):
@@ -318,8 +332,23 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
         offsets[f"{side}_hip"] = hip_yaw - hip_pitch
         offsets[f"{side}_wrist"] = wrist_yaw - wrist_roll
         offsets[f"{side}_ankle"] = ankle_roll - ankle_pitch
+        offset_edges[f"{side}_shoulder"] = (
+            _local_body_translation(model, f"{side}_shoulder_roll_link"),
+            _local_body_translation(model, f"{side}_shoulder_yaw_link"),
+        )
+        offset_edges[f"{side}_hip"] = (
+            _local_body_translation(model, f"{side}_hip_roll_link"),
+            _local_body_translation(model, f"{side}_hip_yaw_link"),
+        )
+        offset_edges[f"{side}_wrist"] = (
+            _local_body_translation(model, f"{side}_wrist_pitch_link"),
+            _local_body_translation(model, f"{side}_wrist_yaw_link"),
+        )
+        offset_edges[f"{side}_ankle"] = (_local_body_translation(model, f"{side}_ankle_roll_link"),)
         spans[f"{side}_arm"] = elbow - shoulder_yaw
+        spans[f"{side}_forearm"] = wrist_roll - elbow
         spans[f"{side}_leg"] = knee - hip_yaw
+        spans[f"{side}_shank"] = ankle_pitch - knee
         root_anchors[f"{side}_hip"] = hip_pitch - pelvis
 
     shoulder_center = 0.5 * (joints["left_shoulder_pitch_joint"] + joints["right_shoulder_pitch_joint"])
@@ -335,6 +364,10 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
     head_max = head_points.max(axis=0)
     head_extent = head_max - head_min
     offsets["waist"] = joints["waist_pitch_joint"] - joints["waist_yaw_joint"]
+    offset_edges["waist"] = (
+        _local_body_translation(model, "waist_roll_link"),
+        _local_body_translation(model, "torso_link"),
+    )
     spans["torso"] = shoulder_center - pelvis
 
     lengths = {
@@ -378,6 +411,7 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
         widths_m=widths,
         root_anchors_m=root_anchors,
         compound_offsets_m=offsets,
+        compound_offset_edges_m=offset_edges,
         span_vectors_m=spans,
         region_extents_m=region_extents,
         region_centers_m=region_centers,
@@ -413,16 +447,32 @@ def _align_vector(source: np.ndarray, target: np.ndarray) -> np.ndarray:
 
 
 def _canonical_offsets(anthropometry: G1Anthropometry, preserve: bool) -> dict[str, np.ndarray]:
+    """Reduce fixed compound edges into the canonical Xsens reference frames.
+
+    Arm clusters are serialized along the T-pose arm axis. This retains every
+    fixed inter-axis translation once while avoiding a pose-dependent aggregate
+    shoulder/wrist vector. Hip and waist aggregates already live in canonical
+    root frames. The single ankle edge is expressed in the canonical shank
+    frame, rather than being incorrectly rotated with the thigh.
+    """
+
     result = {name: np.zeros(3, dtype=float) for name in anthropometry.compound_offsets_m}
     if not preserve:
         return result
     for side, sign in (("left", 1.0), ("right", -1.0)):
-        arm_rotation = _align_vector(anthropometry.span_vectors_m[f"{side}_arm"], np.array([0.0, sign, 0.0]))
-        leg_rotation = _align_vector(anthropometry.span_vectors_m[f"{side}_leg"], np.array([0.0, 0.0, -1.0]))
+        arm_direction = np.array([0.0, sign, 0.0])
         for cluster in ("shoulder", "wrist"):
-            result[f"{side}_{cluster}"] = arm_rotation @ anthropometry.compound_offsets_m[f"{side}_{cluster}"]
-        for cluster in ("hip", "ankle"):
-            result[f"{side}_{cluster}"] = leg_rotation @ anthropometry.compound_offsets_m[f"{side}_{cluster}"]
+            path_length = sum(
+                np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_{cluster}"]
+            )
+            result[f"{side}_{cluster}"] = arm_direction * path_length
+
+        result[f"{side}_hip"] = anthropometry.compound_offsets_m[f"{side}_hip"].copy()
+        shank_rotation = _align_vector(
+            anthropometry.span_vectors_m[f"{side}_shank"],
+            np.array([0.0, 0.0, -1.0]),
+        )
+        result[f"{side}_ankle"] = shank_rotation @ anthropometry.compound_offsets_m[f"{side}_ankle"]
     torso_rotation = _align_vector(anthropometry.span_vectors_m["torso"], np.array([0.0, 0.0, 1.0]))
     result["waist"] = torso_rotation @ anthropometry.compound_offsets_m["waist"]
     return result
@@ -677,7 +727,15 @@ def _shared_visual_attachments(
     positions: Mapping[str, np.ndarray],
     joint_centers: Mapping[str, np.ndarray],
 ) -> dict[str, tuple[MeshAttachment, ...]]:
-    proportions = _g1_xsens_avatar_proportions_from_layout(anthropometry, positions, joint_centers)
+    # A preserved wrist adapter lies after the rigid forearm span. The Xsens
+    # visual factory has no separate adapter segment, so extend the existing
+    # forearm visual to the hand origin. Joint anchors remain untouched; this
+    # is strictly a longitudinal extent adjustment of the shared visual parts.
+    visual_joint_centers = dict(joint_centers)
+    for side in ("Left", "Right"):
+        if np.linalg.norm(positions[f"{side}Hand"] - joint_centers[f"{side}Wrist"]) > 1e-12:
+            visual_joint_centers[f"{side}Wrist"] = positions[f"{side}Hand"]
+    proportions = _g1_xsens_avatar_proportions_from_layout(anthropometry, positions, visual_joint_centers)
     shared_parts = build_xsens_avatar_meshes(proportions)
     transforms: dict[str, tuple[np.ndarray, np.ndarray]] = {
         name: (np.ones(3), np.zeros(3)) for name in proportions.segment_names
@@ -950,6 +1008,10 @@ def export_g1_proportioned_xsens_usd(
         widths_m=anthropometry.widths_m,
         root_anchors_m={name: tuple(map(float, value)) for name, value in anthropometry.root_anchors_m.items()},
         raw_offsets_m={name: tuple(map(float, value)) for name, value in anthropometry.compound_offsets_m.items()},
+        raw_offset_edges_m={
+            name: tuple(tuple(map(float, edge)) for edge in edges)
+            for name, edges in anthropometry.compound_offset_edges_m.items()
+        },
         collapsed_adapter_offsets_m={name: tuple(map(float, value)) for name, value in collapsed_adapters.items()},
         applied_offsets_m={name: tuple(map(float, value)) for name, value in applied.items()},
         max_length_error_m=max_length_error,
