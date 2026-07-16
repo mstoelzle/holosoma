@@ -1,15 +1,84 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from holosoma_retargeting.config_types.viser import ViserConfig, XsensViserConfig
 from holosoma_retargeting.config_values.viser import get_default_xsens_viser_config
-from holosoma_retargeting.src.viser_utils import resolve_frame_times
+from holosoma_retargeting.src.viser_utils import CameraFollowController, resolve_frame_times
 from holosoma_retargeting.viser_player import (
+    add_tennis_racket_control,
+    compute_camera_follow_target,
     compute_ground_plane_bounds,
     resolve_actor_modes,
+    resolve_record_output_path,
     resolve_xsens_actor_offsets,
 )
+
+
+def test_camera_follow_is_opt_in_by_default() -> None:
+    assert ViserConfig().camera_follow is False
+
+
+def test_camera_follow_target_centers_each_actor_equally() -> None:
+    target = compute_camera_follow_target(
+        robot_position_m=np.array([0.0, 0.0, 1.0]),
+        avatar_positions_m=(
+            np.array([[2.0, 0.0, 0.0], [4.0, 0.0, 2.0]]),
+            np.array([[6.0, 3.0, 1.0]]),
+        ),
+    )
+
+    np.testing.assert_allclose(target, [3.0, 1.0, 1.0])
+
+
+def test_camera_follow_target_rejects_missing_actors() -> None:
+    with pytest.raises(ValueError, match="At least one robot or avatar"):
+        compute_camera_follow_target()
+
+
+def test_camera_follow_controller_preserves_view_offset_and_can_be_disabled() -> None:
+    class FakeCheckbox:
+        def __init__(self, initial_value: bool) -> None:
+            self.value = initial_value
+            self.callback = None
+
+        def on_update(self, callback):
+            self.callback = callback
+            return callback
+
+    checkbox = FakeCheckbox(False)
+    camera = SimpleNamespace(
+        position=np.array([4.0, -3.0, 2.0]),
+        look_at=np.array([1.0, 0.0, 1.0]),
+    )
+    client = SimpleNamespace(camera=camera)
+    server = SimpleNamespace(
+        gui=SimpleNamespace(add_checkbox=lambda *_args, **_kwargs: checkbox),
+        on_client_connect=lambda callback: callback,
+        get_clients=lambda: {0: client},
+        atomic=nullcontext,
+    )
+    controller = CameraFollowController(server)
+
+    controller.update_target(np.array([2.0, 2.0, 1.0]))
+    np.testing.assert_array_equal(camera.position, [4.0, -3.0, 2.0])
+
+    checkbox.value = True
+    checkbox.callback(None)
+    np.testing.assert_array_equal(camera.look_at, [2.0, 2.0, 1.0])
+    np.testing.assert_array_equal(camera.position, [5.0, -1.0, 2.0])
+
+    controller.update_target(np.array([3.0, 2.0, 1.0]))
+    np.testing.assert_array_equal(camera.look_at, [3.0, 2.0, 1.0])
+    np.testing.assert_array_equal(camera.position, [6.0, -1.0, 2.0])
+
+    checkbox.value = False
+    controller.update_target(np.array([9.0, 9.0, 9.0]))
+    np.testing.assert_array_equal(camera.position, [6.0, -1.0, 2.0])
 
 
 def test_xsens_options_are_not_part_of_global_viser_config() -> None:
@@ -18,9 +87,101 @@ def test_xsens_options_are_not_part_of_global_viser_config() -> None:
 
     assert not hasattr(base, "actor_modes")
     assert not hasattr(base, "xsens_hdf5")
+    assert not hasattr(base, "show_tennis_racket")
     assert xsens.actor_modes == ("xsens", "g1_xsens")
     assert xsens.xsens_hdf5 == "motion.hdf5"
+    assert xsens.show_tennis_racket is True
     assert isinstance(get_default_xsens_viser_config(), XsensViserConfig)
+
+
+def test_tennis_control_updates_all_rackets_without_affecting_other_bodies() -> None:
+    class FakeCheckbox:
+        def __init__(self, initial_value: bool) -> None:
+            self.value = initial_value
+            self.callback = None
+
+        def on_update(self, callback):
+            self.callback = callback
+            return callback
+
+    class FakeGui:
+        def __init__(self) -> None:
+            self.folders = []
+            self.checkbox = None
+
+        def add_folder(self, label, *, order=None):
+            self.folders.append((label, order))
+            return nullcontext()
+
+        def add_checkbox(self, label, *, initial_value):
+            assert label == "Show tennis racket"
+            self.checkbox = FakeCheckbox(initial_value)
+            return self.checkbox
+
+    pelvis_a = SimpleNamespace(visible=True)
+    pelvis_b = SimpleNamespace(visible=True)
+    racket_a = SimpleNamespace(visible=True)
+    racket_b = SimpleNamespace(visible=True)
+    actors = (
+        SimpleNamespace(body_frames={"Pelvis": pelvis_a, "TennisRacket": racket_a}),
+        SimpleNamespace(body_frames={"Pelvis": pelvis_b, "TennisRacket": racket_b}),
+    )
+    gui = FakeGui()
+
+    checkbox = add_tennis_racket_control(
+        SimpleNamespace(gui=gui),
+        actors,
+        initial_visible=False,
+    )
+
+    assert checkbox is gui.checkbox
+    assert gui.folders == [("Tennis", 50.0)]
+    assert racket_a.visible is False
+    assert racket_b.visible is False
+    assert pelvis_a.visible is True
+    assert pelvis_b.visible is True
+
+    checkbox.value = True
+    checkbox.callback(None)
+    assert racket_a.visible is True
+    assert racket_b.visible is True
+    assert pelvis_a.visible is True
+    assert pelvis_b.visible is True
+
+
+def test_tennis_control_is_absent_when_no_actor_has_a_racket() -> None:
+    gui = SimpleNamespace(
+        add_folder=lambda *_args, **_kwargs: pytest.fail("unexpected tennis folder"),
+        add_checkbox=lambda *_args, **_kwargs: pytest.fail("unexpected tennis checkbox"),
+    )
+    actor = SimpleNamespace(body_frames={"Pelvis": SimpleNamespace(visible=True)})
+
+    checkbox = add_tennis_racket_control(
+        SimpleNamespace(gui=gui),
+        (actor,),
+        initial_visible=True,
+    )
+
+    assert checkbox is None
+
+
+def test_record_path_defaults_to_xsens_hdf5_sibling() -> None:
+    config = XsensViserConfig(
+        actor_modes=("xsens", "g1_xsens"),
+        xsens_hdf5="/tmp/session/stream_log.hdf5",
+    )
+
+    assert Path(resolve_record_output_path(config)) == Path("/tmp/session/stream_log.mp4").resolve()
+
+
+def test_explicit_record_path_overrides_derived_path() -> None:
+    config = XsensViserConfig(
+        actor_modes=("xsens",),
+        xsens_hdf5="motion.hdf5",
+        record_path="videos/custom.gif",
+    )
+
+    assert resolve_record_output_path(config) == "videos/custom.gif"
 
 
 def test_actor_modes_are_composable_unique_and_canonically_ordered() -> None:

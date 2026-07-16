@@ -192,6 +192,110 @@ def reference_grounding_offset_m(source_model: KinematicTree, target_model: Kine
     return reference_root_floor_clearance_m(target_model) - reference_root_floor_clearance_m(source_model)
 
 
+_SOLE_BODY_NAMES_BY_SIDE = {
+    "left": ("LeftFoot", "LeftToe"),
+    "right": ("RightFoot", "RightToe"),
+}
+
+
+@dataclass(frozen=True)
+class _SoleMesh:
+    source_index: int
+    vertices_m: np.ndarray
+
+
+class XsensSoleHeightEvaluator:
+    """Evaluate rendered outsole heights from global Xsens segment poses."""
+
+    def __init__(self, model: KinematicTree, segment_names: tuple[str, ...] | list[str]) -> None:
+        source_indices: dict[str, int] = {}
+        for index, source_name in enumerate(segment_names):
+            normalized = normalize_xsens_name(source_name)
+            if normalized in source_indices:
+                raise ValueError(f"Xsens motion contains duplicate segment name '{source_name}'")
+            source_indices[normalized] = index
+
+        body_map = model.body_map()
+        sole_meshes_by_side: dict[str, tuple[_SoleMesh, ...]] = {}
+        for side, body_names in _SOLE_BODY_NAMES_BY_SIDE.items():
+            sole_meshes: list[_SoleMesh] = []
+            for body_name in body_names:
+                if body_name not in body_map:
+                    raise KeyError(f"Xsens model is missing sole body '{body_name}'")
+                body = body_map[body_name]
+                source_name = str(body.metadata.get("xsens:sourceSegmentName", body.name))
+                source_index = source_indices.get(normalize_xsens_name(source_name))
+                if source_index is None:
+                    raise KeyError(f"Xsens motion is missing sole segment '{source_name}'")
+                outsole_meshes = tuple(mesh for mesh in body.meshes if "outsole" in mesh.name.lower())
+                if not outsole_meshes:
+                    raise ValueError(f"Xsens sole body '{body_name}' has no outsole mesh")
+                for mesh in outsole_meshes:
+                    vertices = np.asarray(mesh.vertices_m, dtype=float)
+                    if vertices.ndim != 2 or vertices.shape[1:] != (3,) or vertices.shape[0] == 0:
+                        raise ValueError(f"Outsole mesh '{mesh.name}' must contain vertices with shape [N, 3]")
+                    if not np.isfinite(vertices).all():
+                        raise ValueError(f"Outsole mesh '{mesh.name}' contains non-finite vertices")
+                    sole_meshes.append(_SoleMesh(source_index, vertices))
+            sole_meshes_by_side[side] = tuple(sole_meshes)
+
+        self.segment_names = tuple(segment_names)
+        self._sole_meshes_by_side = sole_meshes_by_side
+
+    def side_heights_m(
+        self,
+        positions_m: np.ndarray,
+        quaternions_wxyz: np.ndarray,
+    ) -> dict[str, float]:
+        """Return the lowest rendered outsole height for the left and right sides."""
+
+        positions = np.asarray(positions_m, dtype=float)
+        quaternions = np.asarray(quaternions_wxyz, dtype=float)
+        expected_positions_shape = (len(self.segment_names), 3)
+        expected_quaternions_shape = (len(self.segment_names), 4)
+        if positions.shape != expected_positions_shape or quaternions.shape != expected_quaternions_shape:
+            raise ValueError(
+                "Xsens pose arrays do not match the sole evaluator segments: "
+                f"expected {expected_positions_shape} and {expected_quaternions_shape}, "
+                f"got {positions.shape} and {quaternions.shape}"
+            )
+
+        heights: dict[str, float] = {}
+        for side, sole_meshes in self._sole_meshes_by_side.items():
+            minimum_z = np.inf
+            for sole_mesh in sole_meshes:
+                body_position = positions[sole_mesh.source_index]
+                body_quaternion = quaternions[sole_mesh.source_index]
+                for vertex_m in sole_mesh.vertices_m:
+                    vertex_z = body_position[2] + rotate_vector(body_quaternion, vertex_m)[2]
+                    minimum_z = min(minimum_z, float(vertex_z))
+            heights[side] = float(minimum_z)
+        return heights
+
+    def minimum_height_m(
+        self,
+        positions_m: np.ndarray,
+        quaternions_wxyz: np.ndarray,
+    ) -> float:
+        """Return the lowest rendered outsole height across both feet."""
+
+        return min(self.side_heights_m(positions_m, quaternions_wxyz).values())
+
+
+def sole_grounding_offset_m(
+    source_evaluator: XsensSoleHeightEvaluator,
+    target_evaluator: XsensSoleHeightEvaluator,
+    source_positions_m: np.ndarray,
+    target_positions_m: np.ndarray,
+    quaternions_wxyz: np.ndarray,
+) -> float:
+    """Translate the target so its lowest sole matches the source's lowest sole."""
+
+    source_minimum_z = source_evaluator.minimum_height_m(source_positions_m, quaternions_wxyz)
+    target_minimum_z = target_evaluator.minimum_height_m(target_positions_m, quaternions_wxyz)
+    return source_minimum_z - target_minimum_z
+
+
 @dataclass(frozen=True)
 class XsensPoseSample:
     positions_m: np.ndarray

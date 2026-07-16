@@ -8,7 +8,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import tyro
@@ -29,6 +29,7 @@ from holosoma_retargeting.src.recording_utils import (  # noqa: E402
     record_viser_sequence,
 )
 from holosoma_retargeting.src.viser_utils import (  # noqa: E402
+    CameraFollowController,
     QposViserApplier,
     create_motion_control_sliders,
     create_timed_motion_control_sliders,
@@ -37,16 +38,18 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
     XsensKinematicPositionProjector,
     XsensMotionSampler,
+    XsensSoleHeightEvaluator,
     XsensUsdActor,
     build_subject_xsens_reference_model,
     load_xsens_usd_model,
-    reference_grounding_offset_m,
     resolve_g1_xsens_usd,
     resolve_package_path,
     resolve_subject_xsens_usd,
+    sole_grounding_offset_m,
     validate_g1_xsens_usd,
     validate_subject_xsens_usd,
 )
+from holosoma_retargeting.xsens.kinematic_model import TENNIS_RACKET_BODY  # noqa: E402
 
 
 def load_npz(npz_path: str) -> tuple[np.ndarray, int]:
@@ -102,6 +105,77 @@ def resolve_xsens_actor_offsets(
     if "xsens" in offsets and "g1_xsens" in offsets:
         offsets["g1_xsens"] = configured_offset
     return offsets
+
+
+def resolve_record_output_path(config: ViserConfig) -> str:
+    """Resolve an explicit recording path or derive one from the source motion."""
+
+    if config.record_path is not None:
+        return config.record_path
+    if isinstance(config, XsensViserConfig) and config.xsens_hdf5 is not None:
+        actor_modes = resolve_actor_modes(config.actor_modes)
+        if "xsens" in actor_modes or "g1_xsens" in actor_modes:
+            return str(resolve_package_path(config.xsens_hdf5).with_suffix(".mp4"))
+    return str(resolve_package_path(config.qpos_npz).with_suffix(".mp4"))
+
+
+def compute_camera_follow_target(
+    *,
+    robot_position_m: np.ndarray | None = None,
+    avatar_positions_m: Sequence[np.ndarray] = (),
+) -> np.ndarray:
+    """Return the center of the displayed robot and avatar actor positions."""
+
+    actor_centers: list[np.ndarray] = []
+    if robot_position_m is not None:
+        robot_position = np.asarray(robot_position_m, dtype=float)
+        if robot_position.shape != (3,) or not np.isfinite(robot_position).all():
+            raise ValueError("robot_position_m must contain three finite xyz values")
+        actor_centers.append(robot_position)
+    for positions_m in avatar_positions_m:
+        positions = np.asarray(positions_m, dtype=float)
+        if positions.ndim != 2 or positions.shape[1:] != (3,) or positions.shape[0] == 0:
+            raise ValueError("Each avatar position array must have shape [segments, 3]")
+        finite_positions = positions[np.isfinite(positions).all(axis=1)]
+        if finite_positions.shape[0] == 0:
+            raise ValueError("Each avatar must contain at least one finite segment position")
+        actor_centers.append(finite_positions.mean(axis=0))
+    if not actor_centers:
+        raise ValueError("At least one robot or avatar position is required")
+    return np.mean(actor_centers, axis=0)
+
+
+def add_tennis_racket_control(
+    server: viser.ViserServer,
+    actors: Sequence[XsensUsdActor],
+    *,
+    initial_visible: bool,
+) -> Any | None:
+    """Add one tennis-only control for every Xsens actor that has a racket body."""
+
+    racket_frames = tuple(
+        actor.body_frames[TENNIS_RACKET_BODY]
+        for actor in actors
+        if TENNIS_RACKET_BODY in actor.body_frames
+    )
+    if not racket_frames:
+        return None
+
+    for frame in racket_frames:
+        frame.visible = bool(initial_visible)
+
+    with server.gui.add_folder("Tennis", order=50.0):
+        checkbox = server.gui.add_checkbox(
+            "Show tennis racket",
+            initial_value=initial_visible,
+        )
+
+    @checkbox.on_update
+    def _(_evt) -> None:
+        for frame in racket_frames:
+            frame.visible = bool(checkbox.value)
+
+    return checkbox
 
 
 @dataclass(frozen=True)
@@ -183,6 +257,7 @@ def make_player(
         actor_modes,
         xsens_config.g1_xsens_composition_offset_m if xsens_config is not None else (0.0, 0.0, 0.0),
     )
+    record_output_path = resolve_record_output_path(config)
     if show_robot and qpos is None:
         raise ValueError(f"actor_modes={actor_modes} requires qpos motion for the robot actor")
     if show_xsens and (
@@ -234,8 +309,9 @@ def make_player(
     xsens_actors: dict[ActorMode, XsensUsdActor] = {}
     xsens_sampler: XsensMotionSampler | None = None
     g1_xsens_projector: XsensKinematicPositionProjector | None = None
+    subject_sole_evaluator: XsensSoleHeightEvaluator | None = None
+    g1_sole_evaluator: XsensSoleHeightEvaluator | None = None
     subject_reference_model = None
-    g1_grounding_offset_m = 0.0
     if show_xsens:
         assert xsens_config is not None and xsens_motion is not None and xsens_config.xsens_hdf5 is not None
         xsens_sampler = XsensMotionSampler(xsens_motion)
@@ -258,8 +334,6 @@ def make_player(
             validate_g1_xsens_usd(g1_model)
             if subject_reference_model is None:
                 subject_reference_model = build_subject_xsens_reference_model(xsens_config.xsens_hdf5)
-            g1_grounding_offset_m = reference_grounding_offset_m(subject_reference_model, g1_model)
-            xsens_actor_offsets["g1_xsens"][2] += g1_grounding_offset_m
             xsens_actors["g1_xsens"] = XsensUsdActor(
                 server,
                 g1_model_path,
@@ -269,6 +343,14 @@ def make_player(
                 show_landmarks=xsens_config.show_xsens_landmarks,
             )
             g1_xsens_projector = XsensKinematicPositionProjector(
+                g1_model,
+                xsens_sampler.segment_names,
+            )
+            subject_sole_evaluator = XsensSoleHeightEvaluator(
+                subject_reference_model,
+                xsens_sampler.segment_names,
+            )
+            g1_sole_evaluator = XsensSoleHeightEvaluator(
                 g1_model,
                 xsens_sampler.segment_names,
             )
@@ -307,16 +389,22 @@ def make_player(
     for mode, offset in xsens_actor_offsets.items():
         print(f"[viser_player] {mode} root offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}) m")
     if "g1_xsens" in xsens_actors:
-        print(f"[viser_player] g1_xsens grounding correction={g1_grounding_offset_m:.3f} m")
+        print("[viser_player] g1_xsens grounding=dynamic lowest-sole matching")
 
-    with server.gui.add_folder("Display"):
-        robot_meshes_cb = (
-            server.gui.add_checkbox("Show robot meshes", initial_value=config.show_meshes)
-            if vr is not None
-            else None
-        )
-        xsens_display_controls = {}
-        if xsens_config is not None:
+    with server.gui.add_folder("Camera", order=20.0):
+        camera_follow = CameraFollowController(server, initial_enabled=config.camera_follow)
+
+    robot_meshes_cb = None
+    if vr is not None:
+        with server.gui.add_folder("Robot", order=30.0):
+            robot_meshes_cb = server.gui.add_checkbox(
+                "Show robot meshes",
+                initial_value=config.show_meshes,
+            )
+
+    xsens_display_controls = {}
+    if xsens_config is not None and xsens_actors:
+        with server.gui.add_folder("Xsens", order=40.0):
             for mode, actor in xsens_actors.items():
                 label = "Xsens" if mode == "xsens" else "G1-proportioned Xsens"
                 meshes_cb = server.gui.add_checkbox(
@@ -326,6 +414,12 @@ def make_player(
                     f"Show {label} landmarks", initial_value=xsens_config.show_xsens_landmarks
                 )
                 xsens_display_controls[mode] = (actor, meshes_cb, landmarks_cb)
+
+        add_tennis_racket_control(
+            server,
+            tuple(xsens_actors.values()),
+            initial_visible=xsens_config.show_tennis_racket,
+        )
 
     if robot_meshes_cb is not None:
 
@@ -349,6 +443,11 @@ def make_player(
     if not show_xsens:
         assert qpos is not None and vr is not None and robot_root is not None and robot_applier is not None
         print(f"[viser_player] mode=robot | {qpos.shape[0]} frames | robot_dof={robot_dof}")
+
+        def _apply_robot_frame(frame_idx: int) -> None:
+            robot_applier.apply_frame(qpos, frame_idx)
+            camera_follow.update_target(qpos[int(np.clip(frame_idx, 0, qpos.shape[0] - 1)), 0:3])
+
         if config.record_video:
             frame_indices = build_record_frame_indices(
                 n_frames=int(qpos.shape[0]),
@@ -358,9 +457,9 @@ def make_player(
             )
             record_viser_sequence(
                 server=server,
-                apply_frame=lambda frame_idx: robot_applier.apply_frame(qpos, frame_idx),
+                apply_frame=_apply_robot_frame,
                 frame_indices=frame_indices,
-                output_path=config.record_path,
+                output_path=record_output_path,
                 width=config.record_width,
                 height=config.record_height,
                 fps=float(config.record_fps if config.record_fps is not None else actual_robot_fps),
@@ -386,6 +485,7 @@ def make_player(
             initial_interp_mult=config.visual_fps_multiplier,
             loop=config.loop,
             frame_times_s=np.arange(qpos.shape[0], dtype=float) / actual_robot_fps,
+            on_pose_applied=lambda pose: camera_follow.update_target(pose[0:3]),
         )
         return server
 
@@ -401,19 +501,38 @@ def make_player(
 
     def _apply_time(time_s: float) -> None:
         xsens_pose = xsens_sampler.sample(time_s)
+        frame_actor_offsets = {
+            mode: np.asarray(offset, dtype=float).copy()
+            for mode, offset in xsens_actor_offsets.items()
+        }
+        g1_positions = None
+        if "g1_xsens" in xsens_actors:
+            assert g1_xsens_projector is not None
+            assert subject_sole_evaluator is not None and g1_sole_evaluator is not None
+            g1_positions = g1_xsens_projector.project(
+                xsens_pose.positions_m,
+                xsens_pose.quaternions_wxyz,
+            )
+            frame_actor_offsets["g1_xsens"][2] += sole_grounding_offset_m(
+                subject_sole_evaluator,
+                g1_sole_evaluator,
+                xsens_pose.positions_m,
+                g1_positions,
+                xsens_pose.quaternions_wxyz,
+            )
+            xsens_actors["g1_xsens"].root.position = frame_actor_offsets["g1_xsens"]
+
+        avatar_positions: list[np.ndarray] = []
         for mode, actor in xsens_actors.items():
-            actor_positions = xsens_pose.positions_m
-            if mode == "g1_xsens":
-                assert g1_xsens_projector is not None
-                actor_positions = g1_xsens_projector.project(
-                    xsens_pose.positions_m,
-                    xsens_pose.quaternions_wxyz,
-                )
+            actor_positions = g1_positions if mode == "g1_xsens" else xsens_pose.positions_m
+            assert actor_positions is not None
             actor.apply_pose(
                 xsens_sampler.segment_names,
                 actor_positions,
                 xsens_pose.quaternions_wxyz,
             )
+            avatar_positions.append(actor_positions + frame_actor_offsets[mode][None, :])
+        robot_position = None
         if show_robot:
             assert qpos is not None and robot_applier is not None
             has_object = robot_applier.has_object_input(qpos)
@@ -425,6 +544,13 @@ def make_player(
                 has_object_input=has_object,
             )
             robot_applier.apply_qpos(sampled_qpos, has_object_input=has_object)
+            robot_position = sampled_qpos[0:3]
+        camera_follow.update_target(
+            compute_camera_follow_target(
+                robot_position_m=robot_position,
+                avatar_positions_m=avatar_positions,
+            )
+        )
 
     playback_fps = _nominal_fps(master_times, config.fps)
     print(
@@ -442,7 +568,7 @@ def make_player(
             server=server,
             apply_frame=lambda frame_idx: _apply_time(float(master_times[frame_idx])),
             frame_indices=frame_indices,
-            output_path=config.record_path,
+            output_path=record_output_path,
             width=config.record_width,
             height=config.record_height,
             fps=float(config.record_fps if config.record_fps is not None else playback_fps),

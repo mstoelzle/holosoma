@@ -12,6 +12,59 @@ import viser  # type: ignore[import-not-found]
 from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
 
+class CameraFollowController:
+    """Translate connected Viser cameras with a moving world-space target."""
+
+    def __init__(self, server: viser.ViserServer, *, initial_enabled: bool = False) -> None:
+        self.server = server
+        self.checkbox = server.gui.add_checkbox(
+            "Automatically follow subjects",
+            initial_value=initial_enabled,
+        )
+        self._target: np.ndarray | None = None
+        self._lock = threading.Lock()
+
+        @self.checkbox.on_update
+        def _(_event) -> None:
+            with self._lock:
+                target = None if self._target is None else self._target.copy()
+            if self.checkbox.value and target is not None:
+                self._move_cameras(target)
+
+        @server.on_client_connect
+        def _(client: viser.ClientHandle) -> None:
+            with self._lock:
+                target = None if self._target is None else self._target.copy()
+            if self.checkbox.value and target is not None:
+                self._move_camera(client, target)
+
+    def update_target(self, target: np.ndarray) -> None:
+        """Store the latest target and update all cameras when following is active."""
+
+        target_array = np.asarray(target, dtype=float)
+        if target_array.shape != (3,) or not np.isfinite(target_array).all():
+            raise ValueError("Camera follow target must contain three finite xyz values")
+        with self._lock:
+            self._target = target_array.copy()
+        if self.checkbox.value:
+            self._move_cameras(target_array)
+
+    def _move_cameras(self, target: np.ndarray) -> None:
+        clients = tuple(self.server.get_clients().values())
+        if not clients:
+            return
+        with self.server.atomic():
+            for client in clients:
+                self._move_camera(client, target)
+
+    @staticmethod
+    def _move_camera(client: viser.ClientHandle, target: np.ndarray) -> None:
+        camera = client.camera
+        translation = target - np.asarray(camera.look_at, dtype=float)
+        camera.position = np.asarray(camera.position, dtype=float) + translation
+        camera.look_at = target
+
+
 def quat_normalize(q: np.ndarray) -> np.ndarray:
     q = np.asarray(q, float)
     n = float(np.linalg.norm(q))
@@ -180,6 +233,7 @@ def create_motion_control_sliders(
     initial_interp_mult: int = 2,
     loop: bool = True,
     frame_times_s: np.ndarray | None = None,
+    on_pose_applied: Callable[[np.ndarray], None] | None = None,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """
     Create a slider + play/pause controls and a background player thread with smooth, slerp-based interpolation.
@@ -204,6 +258,7 @@ def create_motion_control_sliders(
         initial_interp_mult: visual upsampling multiplier.
         loop: whether to wrap around at the end.
         frame_times_s: optional source timestamps for the elapsed-time readout.
+        on_pose_applied: optional callback receiving each displayed qpos pose.
 
     Returns:
         (controls, initial_values) — currently returns the [frame_slider] and [0.0]
@@ -226,7 +281,7 @@ def create_motion_control_sliders(
     )
 
     # ---------------- GUI ----------------
-    with server.gui.add_folder("Playback"):
+    with server.gui.add_folder("Playback", order=0.0):
         frame_slider = server.gui.add_slider("Frame", min=0, max=max(0, n_frames - 1), step=1, initial_value=0)
         time_readout = server.gui.add_number(
             "Elapsed time (s)",
@@ -237,7 +292,7 @@ def create_motion_control_sliders(
         )
         play_btn = server.gui.add_button("Play / Pause")
         fps_in = server.gui.add_number("FPS", initial_value=int(initial_fps), min=1, max=240, step=1)
-    with server.gui.add_folder("Smoothing"):
+    with server.gui.add_folder("Smoothing", order=10.0):
         interp_mult_in = server.gui.add_number(
             "Visual FPS multiplier", initial_value=int(initial_interp_mult), min=1, max=8, step=1
         )
@@ -322,6 +377,9 @@ def create_motion_control_sliders(
             # fallback static pose
             object_base_frame.position = np.zeros(3)
             object_base_frame.wxyz = np.array([1.0, 0.0, 0.0, 0.0])
+
+        if on_pose_applied is not None:
+            on_pose_applied(q)
 
     def _apply_discrete_frame(i: int) -> None:
         i = int(np.clip(i, 0, n_frames - 1))
@@ -434,7 +492,7 @@ def create_timed_motion_control_sliders(
     )
     duration_s = float(frame_times[-1])
 
-    with server.gui.add_folder("Playback"):
+    with server.gui.add_folder("Playback", order=0.0):
         frame_slider = server.gui.add_slider(
             "Frame",
             min=0,
@@ -457,7 +515,7 @@ def create_timed_motion_control_sliders(
             max=240,
             step=1,
         )
-    with server.gui.add_folder("Smoothing"):
+    with server.gui.add_folder("Smoothing", order=10.0):
         interp_mult_in = server.gui.add_number(
             "Visual FPS multiplier",
             initial_value=max(1, int(initial_interp_mult)),

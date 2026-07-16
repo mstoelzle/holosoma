@@ -35,6 +35,9 @@ class ViserConfig:
     show_meshes: bool = True
     """Whether to show mesh visualizations."""
 
+    camera_follow: bool = False
+    """Whether the interactive camera initially follows the displayed actors."""
+
     grid_width: float | None = None
     """Optional minimum grid width. None derives it entirely from motion bounds."""
 
@@ -50,8 +53,8 @@ class ViserConfig:
     record_video: bool = False
     """Whether to record the Viser playback to a video file."""
 
-    record_path: str = "viser_player_recording.mp4"
-    """Output path for recorded video. Extension may be .mp4 or .gif."""
+    record_path: str | None = None
+    """Optional recording output path. Defaults beside the source motion with a .mp4 suffix."""
 
     record_width: int = 1280
     """Rendered recording width in pixels."""
@@ -129,3 +132,6 @@ class XsensViserConfig(ViserConfig):
 
     show_xsens_landmarks: bool = False
     """Whether calibrated Xsens landmarks are initially visible."""
+
+    show_tennis_racket: bool = True
+    """Whether the tracked tennis racket is initially visible."""
