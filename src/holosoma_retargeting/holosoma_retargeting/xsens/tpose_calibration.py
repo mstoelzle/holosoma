@@ -17,8 +17,8 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
+from holosoma_retargeting.src.mujoco_utils import mujoco_frame_pose
 from holosoma_retargeting.xsens.orientation_tracking import build_xsens_axis_calibration_metadata
-
 
 CALIBRATION_POSITION_MAPPING = {
     "Pelvis": "pelvis_contour_link",
@@ -422,18 +422,10 @@ class _G1CalibrationProblem:
         return straight_qpos
 
     def _frame_position(self, frame_name: str) -> np.ndarray:
-        if frame_name in self.body_name_to_id:
-            return self.data.xpos[self.body_name_to_id[frame_name]].copy()
-        if frame_name in self.geom_name_to_id:
-            return self.data.geom_xpos[self.geom_name_to_id[frame_name]].copy()
-        raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
+        return mujoco_frame_pose(self.model, self.data, frame_name)[0]
 
     def _frame_rotation(self, frame_name: str) -> np.ndarray:
-        if frame_name in self.body_name_to_id:
-            return self.data.xmat[self.body_name_to_id[frame_name]].reshape(3, 3).copy()
-        if frame_name in self.geom_name_to_id:
-            return self.data.geom_xmat[self.geom_name_to_id[frame_name]].reshape(3, 3).copy()
-        raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
+        return mujoco_frame_pose(self.model, self.data, frame_name)[1]
 
     def _initial_qpos(self) -> np.ndarray:
         qpos = np.zeros(self.model.nq, dtype=float)
@@ -612,7 +604,9 @@ class _G1CalibrationProblem:
             "right_knee_joint",
         )
         for joint_name in straight_joint_names:
-            residuals.append(np.array([np.sqrt(self.config.straightness_weight) * qpos[self._joint_qpos_index(joint_name)]]))
+            residuals.append(
+                np.array([np.sqrt(self.config.straightness_weight) * qpos[self._joint_qpos_index(joint_name)]])
+            )
 
         for joint_name, straight_qpos in self.straight_elbow_qpos.items():
             elbow_qpos = qpos[self._joint_qpos_index(joint_name)]

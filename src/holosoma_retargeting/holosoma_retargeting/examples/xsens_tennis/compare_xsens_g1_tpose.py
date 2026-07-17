@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,16 +29,25 @@ src_root = Path(__file__).resolve().parents[3]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.kinematics import KinematicTree  # noqa: E402
+from holosoma_retargeting.data_utils.xsens_hdf5 import load_xsens_hdf5_tpose  # noqa: E402
+from holosoma_retargeting.kinematics import KinematicPose, KinematicTree, Transform  # noqa: E402
+from holosoma_retargeting.src.mujoco_utils import (  # noqa: E402
+    MujocoFramePoseSet,
+    evaluate_mujoco_frame_poses,
+)
 from holosoma_retargeting.usd import open_usd_stage, read_kinematic_tree_from_stage  # noqa: E402
-from holosoma_retargeting.xsens.g1_kinematic_reduction import (  # noqa: E402
-    G1XsensReductionConfig,
-    build_g1_proportioned_xsens_tree,
-    extract_g1_anthropometry,
+from holosoma_retargeting.xsens.kinematic_model import normalize_xsens_name  # noqa: E402
+from holosoma_retargeting.xsens.morphology_adaptation import (  # noqa: E402
+    prepare_g1_xsens_morphology,
+    xsens_body_to_source_mapping,
+)
+from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
+    describe_xsens_orientation_correspondences,
 )
 from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
     XsensTposeCalibrationConfig,
-    solve_xsens_tpose_calibration,
+    XsensTposeCalibrationResult,
+    solve_xsens_tpose_calibration_from_data,
 )
 from holosoma_retargeting.xsens.usd_conversion import convert_xsens_hdf5_to_usd  # noqa: E402
 
@@ -76,16 +86,19 @@ class XsensG1TposeComparisonConfig:
     default_human_height: float = 1.78
     """Human height used by the existing Xsens-to-G1 T-pose calibration."""
 
+    show_orientation_correspondences: bool = True
+    """Initially show calibrated segment/link axes used for orientation tracking."""
+
 
 @dataclass(frozen=True)
 class ComparisonAssets:
     calibrated_xsens_model: KinematicTree
     g1_xsens_model: KinematicTree
+    g1_xsens_tpose: KinematicPose
     calibrated_xsens_usd_path: Path
     g1_urdf_path: Path
-    g1_qpos: np.ndarray
-    g1_solver_success: bool
-    g1_solver_cost: float
+    calibration: XsensTposeCalibrationResult
+    g1_correspondence_link_poses: MujocoFramePoseSet
 
 
 def _package_root() -> Path:
@@ -118,12 +131,15 @@ def _quat_matrix(quaternion_wxyz: np.ndarray) -> np.ndarray:
     )
 
 
-def tree_vertical_bounds(model: KinematicTree) -> tuple[float, float]:
-    """Return reference-pose bounds including local render meshes."""
+def tree_vertical_bounds(
+    model: KinematicTree,
+    body_poses: Mapping[str, Transform] | None = None,
+) -> tuple[float, float]:
+    """Return bounds for reference or supplied body poses, including meshes."""
 
     z_values: list[float] = []
     for body in model.bodies:
-        pose = body.reference_pose
+        pose = body.reference_pose if body_poses is None else body_poses[body.name]
         rotation = _quat_matrix(pose.rotation_wxyz)
         if body.meshes:
             for mesh in body.meshes:
@@ -140,6 +156,37 @@ def side_by_side_offsets(spacing_m: float) -> tuple[float, float, float]:
     if spacing_m <= 0.0:
         raise ValueError("spacing_m must be positive")
     return (-float(spacing_m), 0.0, float(spacing_m))
+
+
+def body_poses_from_xsens_pose(
+    model: KinematicTree,
+    pose: KinematicPose,
+) -> dict[str, Transform]:
+    """Map one ordered Xsens pose onto a validated Xsens kinematic tree."""
+
+    body_to_source = xsens_body_to_source_mapping(model, pose.body_names)
+    source_indices = {name: index for index, name in enumerate(pose.body_names)}
+    return {
+        body.name: Transform(
+            np.asarray(pose.positions_m[source_indices[body_to_source[body.name]]], dtype=float),
+            np.asarray(pose.orientations_wxyz[source_indices[body_to_source[body.name]]], dtype=float),
+        )
+        for body in model.bodies
+    }
+
+
+def orientation_correspondence_body_names(
+    model: KinematicTree,
+    orientation_names: list[str],
+) -> set[str]:
+    """Return model bodies participating in calibrated orientation tracking."""
+
+    active_names = {normalize_xsens_name(name) for name in orientation_names}
+    return {
+        body.name
+        for body in model.bodies
+        if normalize_xsens_name(str(body.metadata.get("xsens:sourceSegmentName", body.name))) in active_names
+    }
 
 
 def _calibrated_usd_path(config: XsensG1TposeComparisonConfig, hdf5_path: Path) -> Path:
@@ -166,34 +213,47 @@ def prepare_comparison_assets(config: XsensG1TposeComparisonConfig) -> Compariso
     calibrated_usd_path = _calibrated_usd_path(config, hdf5_path)
     calibrated_xsens_model = read_kinematic_tree_from_stage(open_usd_stage(calibrated_usd_path))
 
-    anthropometry = extract_g1_anthropometry(_resolve_g1_xml(g1_urdf_path))
-    g1_xsens_model = build_g1_proportioned_xsens_tree(
-        anthropometry,
-        G1XsensReductionConfig(
-            preserve_joint_offsets=config.preserve_joint_offsets,
-            include_visuals=True,
-        ),
+    tpose = load_xsens_hdf5_tpose(hdf5_path)
+    prepared_morphology = prepare_g1_xsens_morphology(
+        tpose.segment_names,
+        hdf5_path=hdf5_path,
+        g1_model_path=_resolve_g1_xml(g1_urdf_path),
+        grounding="match_lowest_soles",
+        preserve_joint_offsets=config.preserve_joint_offsets,
+    )
+    g1_xsens_tpose = prepared_morphology.adapter.adapt_pose(
+        KinematicPose(
+            tuple(tpose.segment_names),
+            tpose.positions_m,
+            tpose.quaternions_wijk,
+        )
     )
 
-    calibration = solve_xsens_tpose_calibration(
-        hdf5_path,
-        config=XsensTposeCalibrationConfig(
-            robot_type="g1",
-            variant="Tpose",
-            robot_urdf_file=str(g1_urdf_path),
-            default_human_height=config.default_human_height,
-            max_nfev=config.tpose_max_nfev,
-            verbose=0,
-        ),
+    calibration_config = XsensTposeCalibrationConfig(
+        robot_type="g1",
+        variant="Tpose",
+        robot_urdf_file=str(g1_urdf_path),
+        default_human_height=config.default_human_height,
+        max_nfev=config.tpose_max_nfev,
+        verbose=0,
+    )
+    calibration = solve_xsens_tpose_calibration_from_data(
+        tpose,
+        config=calibration_config,
+    )
+    correspondence_link_poses = evaluate_mujoco_frame_poses(
+        _resolve_g1_xml(g1_urdf_path),
+        calibration.qpos[0],
+        calibration.robot_link_names,
     )
     return ComparisonAssets(
         calibrated_xsens_model=calibrated_xsens_model,
-        g1_xsens_model=g1_xsens_model,
+        g1_xsens_model=prepared_morphology.target_model,
+        g1_xsens_tpose=g1_xsens_tpose,
         calibrated_xsens_usd_path=calibrated_usd_path,
         g1_urdf_path=g1_urdf_path,
-        g1_qpos=np.asarray(calibration.qpos[0], dtype=float),
-        g1_solver_success=calibration.solver_success,
-        g1_solver_cost=calibration.solver_cost,
+        calibration=calibration,
+        g1_correspondence_link_poses=correspondence_link_poses,
     )
 
 
@@ -203,33 +263,33 @@ def _add_kinematic_tree(
     root_path: str,
     model: KinematicTree,
     lateral_offset_m: float,
+    body_poses: Mapping[str, Transform] | None = None,
     include_tennis_racket: bool = False,
-) -> tuple[viser.FrameHandle, list[viser.FrameHandle], float]:
-    minimum_z, maximum_z = tree_vertical_bounds(model)
+) -> tuple[viser.FrameHandle, dict[str, viser.FrameHandle], float]:
+    minimum_z, maximum_z = tree_vertical_bounds(model, body_poses)
     root = server.scene.add_frame(
         root_path,
         show_axes=False,
         position=np.array([0.0, lateral_offset_m, -minimum_z]),
     )
-    axes: list[viser.FrameHandle] = []
+    axes: dict[str, viser.FrameHandle] = {}
     for body in model.bodies:
         if body.name == "TennisRacket" and not include_tennis_racket:
             continue
+        pose = body.reference_pose if body_poses is None else body_poses[body.name]
         body_path = f"{root_path}/bodies/{body.name}"
         server.scene.add_frame(
             body_path,
             show_axes=False,
-            position=body.reference_pose.translation_m,
-            wxyz=body.reference_pose.rotation_wxyz,
+            position=pose.translation_m,
+            wxyz=pose.rotation_wxyz,
         )
-        axes.append(
-            server.scene.add_frame(
-                f"{body_path}/axes",
-                show_axes=True,
-                axes_length=0.07,
-                axes_radius=0.0025,
-                visible=False,
-            )
+        axes[body.name] = server.scene.add_frame(
+            f"{body_path}/axes",
+            show_axes=True,
+            axes_length=0.07,
+            axes_radius=0.0025,
+            visible=False,
         )
         for mesh in body.meshes:
             server.scene.add_mesh_simple(
@@ -272,9 +332,10 @@ def make_comparison_viewer(
         root_path="/comparison/g1_xsens",
         model=assets.g1_xsens_model,
         lateral_offset_m=generated_offset,
+        body_poses=body_poses_from_xsens_pose(assets.g1_xsens_model, assets.g1_xsens_tpose),
     )
 
-    g1_qpos = assets.g1_qpos
+    g1_qpos = np.asarray(assets.calibration.qpos[0], dtype=float)
     robot_root = server.scene.add_frame(
         "/comparison/actual_g1",
         show_axes=False,
@@ -301,6 +362,34 @@ def make_comparison_viewer(
     robot_dof = len(viser_robot.get_actuated_joint_limits())
     viser_robot.update_cfg(g1_qpos[7 : 7 + robot_dof])
 
+    robot_correspondence_axes: list[viser.FrameHandle] = []
+    for link_name, position, quaternion in zip(
+        assets.g1_correspondence_link_poses.names,
+        assets.g1_correspondence_link_poses.positions_m,
+        assets.g1_correspondence_link_poses.quaternions_wxyz,
+        strict=True,
+    ):
+        robot_correspondence_axes.append(
+            server.scene.add_frame(
+                f"/orientation_correspondence/actual_g1/{link_name}",
+                position=np.asarray(position, dtype=float) + np.array([0.0, robot_offset, 0.0]),
+                wxyz=np.asarray(quaternion, dtype=float),
+                show_axes=True,
+                axes_length=0.1,
+                axes_radius=0.003,
+                visible=config.show_orientation_correspondences,
+            )
+        )
+
+    calibrated_correspondence_bodies = orientation_correspondence_body_names(
+        assets.calibrated_xsens_model,
+        assets.calibration.active_orientation_mapping_names,
+    )
+    generated_correspondence_bodies = orientation_correspondence_body_names(
+        assets.g1_xsens_model,
+        assets.calibration.active_orientation_mapping_names,
+    )
+
     label_height = max(calibrated_height, generated_height, 1.5) + 0.12
     label_specs = (
         ("calibrated_xsens", "Human-subject Xsens avatar", calibrated_offset),
@@ -325,7 +414,11 @@ def make_comparison_viewer(
         show_calibrated = server.gui.add_checkbox("Human-subject Xsens avatar", initial_value=True)
         show_generated = server.gui.add_checkbox("G1 Xsens avatar", initial_value=True)
         show_robot = server.gui.add_checkbox("Actual G1", initial_value=True)
-        show_axes = server.gui.add_checkbox("Show frames", initial_value=False)
+        show_axes = server.gui.add_checkbox("Show all Xsens frames", initial_value=False)
+        show_correspondences = server.gui.add_checkbox(
+            "Show orientation correspondences",
+            initial_value=config.show_orientation_correspondences,
+        )
 
     @show_calibrated.on_update
     def _(_) -> None:
@@ -339,12 +432,28 @@ def make_comparison_viewer(
     def _(_) -> None:
         viser_robot.show_visual = bool(show_robot.value)
         robot_root.visible = bool(show_robot.value)
+        _update_axes_visibility()
+
+    def _update_axes_visibility() -> None:
+        show_all = bool(show_axes.value)
+        show_mapped = bool(show_correspondences.value)
+        for body_name, handle in calibrated_axes.items():
+            handle.visible = show_all or (show_mapped and body_name in calibrated_correspondence_bodies)
+        for body_name, handle in generated_axes.items():
+            handle.visible = show_all or (show_mapped and body_name in generated_correspondence_bodies)
+        robot_axes.visible = show_all
+        for handle in robot_correspondence_axes:
+            handle.visible = show_mapped and bool(show_robot.value)
 
     @show_axes.on_update
     def _(_) -> None:
-        visible = bool(show_axes.value)
-        for handle in (*calibrated_axes, *generated_axes, robot_axes):
-            handle.visible = visible
+        _update_axes_visibility()
+
+    @show_correspondences.on_update
+    def _(_) -> None:
+        _update_axes_visibility()
+
+    _update_axes_visibility()
 
     @server.on_client_connect
     def _(client: viser.ClientHandle) -> None:
@@ -354,8 +463,21 @@ def make_comparison_viewer(
 
     print(f"[compare_xsens_g1_tpose] Human-subject Xsens avatar USD: {assets.calibrated_xsens_usd_path}")
     print(
-        f"[compare_xsens_g1_tpose] G1 T-pose solver_success={assets.g1_solver_success} cost={assets.g1_solver_cost:.4f}"
+        "[compare_xsens_g1_tpose] G1 T-pose "
+        f"solver_success={assets.calibration.solver_success} cost={assets.calibration.solver_cost:.4f}"
     )
+    print(
+        "[compare_xsens_g1_tpose] Human Xsens -> G1-sized Xsens is a direct one-to-one joint-configuration "
+        "transfer (no IK/optimization): global segment orientations are copied exactly and positions are "
+        "reconstructed only from G1-sized joint anchors."
+    )
+    print("[compare_xsens_g1_tpose] Rotational correspondence:")
+    for line in describe_xsens_orientation_correspondences(
+        assets.calibration.active_orientation_mapping_names,
+        assets.calibration.robot_link_names,
+        assets.calibration.orientation_offsets_wijk,
+    ):
+        print(f"[compare_xsens_g1_tpose]   {line}")
     print("[compare_xsens_g1_tpose] Column order: human-subject Xsens avatar | G1 Xsens avatar | actual G1")
     return server
 

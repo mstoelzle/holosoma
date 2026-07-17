@@ -1,10 +1,69 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Tuple
 
+import mujoco  # type: ignore[import-not-found]
 import numpy as np
+from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 Pair = Tuple[str, str]
+
+
+@dataclass(frozen=True)
+class MujocoFramePoseSet:
+    """World poses of named MuJoCo bodies or geometries."""
+
+    names: tuple[str, ...]
+    positions_m: np.ndarray
+    quaternions_wxyz: np.ndarray
+
+
+def mujoco_frame_pose(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    frame_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return a named MuJoCo body/geometry world position and rotation matrix."""
+
+    body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, frame_name)
+    if body_id >= 0:
+        return data.xpos[body_id].copy(), data.xmat[body_id].reshape(3, 3).copy()
+    geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, frame_name)
+    if geom_id >= 0:
+        return data.geom_xpos[geom_id].copy(), data.geom_xmat[geom_id].reshape(3, 3).copy()
+    raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
+
+
+def evaluate_mujoco_frame_poses(
+    model_path: str | Path,
+    qpos: np.ndarray,
+    frame_names: Sequence[str],
+) -> MujocoFramePoseSet:
+    """Evaluate named frame world poses at one configuration of any MuJoCo model."""
+
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    values = np.asarray(qpos, dtype=float).reshape(-1)
+    if values.shape != (model.nq,):
+        raise ValueError(f"Expected qpos with shape ({model.nq},), got {values.shape}")
+
+    data = mujoco.MjData(model)
+    data.qpos[:] = values
+    mujoco.mj_forward(model, data)
+    positions = []
+    quaternions = []
+    for frame_name in frame_names:
+        position, rotation = mujoco_frame_pose(model, data, frame_name)
+        quaternion_xyzw = Rotation.from_matrix(rotation).as_quat()
+        positions.append(position)
+        quaternions.append(quaternion_xyzw[[3, 0, 1, 2]])
+    return MujocoFramePoseSet(
+        names=tuple(frame_names),
+        positions_m=np.asarray(positions, dtype=float).reshape(-1, 3),
+        quaternions_wxyz=np.asarray(quaternions, dtype=float).reshape(-1, 4),
+    )
 
 
 def _mesh_local_vf(model, geom_id):

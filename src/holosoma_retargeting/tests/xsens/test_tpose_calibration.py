@@ -12,11 +12,14 @@ from holosoma_retargeting.config_types.task import TaskConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Tpose
 from holosoma_retargeting.examples.robot_retarget import create_task_constants
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
+from holosoma_retargeting.src.mujoco_utils import evaluate_mujoco_frame_poses
 from holosoma_retargeting.xsens.orientation_tracking import (
     XSENS_AXIS_SPECS,
     build_xsens_axis_calibration_metadata,
+    build_xsens_orientation_targets_from_calibration,
     load_xsens_orientation_targets,
     matrix_to_quat_wijk,
+    quat_wijk_to_matrix,
 )
 from holosoma_retargeting.xsens.tpose_calibration import (
     CALIBRATION_POSITION_MAPPING,
@@ -242,9 +245,10 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
         source_indices=list(range(len(XSENS_BODY_SEGMENT_NAMES))),
     )
 
+    calibration_config = XsensTposeCalibrationConfig(max_nfev=8, verbose=0)
     result = solve_xsens_tpose_calibration_from_data(
         tpose,
-        config=XsensTposeCalibrationConfig(max_nfev=8, verbose=0),
+        config=calibration_config,
     )
 
     assert result.qpos.shape == (1, 36)
@@ -253,6 +257,22 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     assert result.axis_names == [spec.name for spec in XSENS_AXIS_SPECS]
     assert result.axis_local_tpose_xyz.shape == (len(XSENS_AXIS_SPECS), 3)
     assert result.position_offsets_robot_minus_xsens_m.shape == (len(CALIBRATION_POSITION_MAPPING), 3)
+
+    link_poses = evaluate_mujoco_frame_poses(
+        MODEL_DIR / "g1_29dof.xml",
+        result.qpos[0],
+        result.robot_link_names,
+    )
+    targets = build_xsens_orientation_targets_from_calibration(
+        result,
+        motion_quaternions_wijk=tpose.quaternions_wijk[None, ...],
+        segment_names=tpose.segment_names,
+    )
+    np.testing.assert_allclose(
+        quat_wijk_to_matrix(link_poses.quaternions_wxyz),
+        targets.orientation_target_rotations[0],
+        atol=1e-10,
+    )
 
     model = mujoco.MjModel.from_xml_path(str(MODEL_DIR / "g1_29dof.xml"))
     data = mujoco.MjData(model)

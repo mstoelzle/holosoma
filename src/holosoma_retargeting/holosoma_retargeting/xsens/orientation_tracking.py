@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
@@ -38,6 +40,51 @@ class XsensOrientationTargets:
     axis_robot_end_link_names: list[str]
     axis_target_vectors: np.ndarray
     axis_weights: np.ndarray
+
+
+class XsensOrientationCalibration(Protocol):
+    """Calibration metadata required to construct dynamic orientation targets."""
+
+    active_orientation_mapping_names: list[str]
+    robot_link_names: list[str]
+    orientation_offsets_wijk: np.ndarray
+    axis_names: list[str]
+    axis_xsens_segment_names: list[str]
+    axis_local_tpose_xyz: np.ndarray
+    axis_robot_start_link_names: list[str]
+    axis_robot_end_link_names: list[str]
+    axis_weights: np.ndarray
+
+
+def describe_xsens_orientation_correspondences(
+    orientation_names: Sequence[str],
+    robot_link_names: Sequence[str],
+    orientation_offsets_wijk: np.ndarray,
+) -> tuple[str, ...]:
+    """Describe the calibrated Xsens-segment to robot-link rotations."""
+
+    offsets = np.asarray(orientation_offsets_wijk, dtype=float)
+    if len(orientation_names) != len(robot_link_names) or len(orientation_names) != len(offsets):
+        raise ValueError("Orientation segment names, robot link names, and offsets must have the same length")
+
+    lines = [
+        "R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset",
+        "R_offset = R_Xsens_segment_Tpose_world^T @ R_G1_link_Tpose_world",
+    ]
+    for xsens_name, robot_link, offset in zip(
+        orientation_names,
+        robot_link_names,
+        offsets,
+        strict=True,
+    ):
+        normalized_offset = np.asarray(offset, dtype=float)
+        normalized_offset /= max(float(np.linalg.norm(normalized_offset)), 1e-12)
+        offset_angle_deg = float(np.degrees(2.0 * np.arccos(np.clip(abs(normalized_offset[0]), 0.0, 1.0))))
+        offset_text = ", ".join(f"{value:+.6f}" for value in normalized_offset)
+        lines.append(
+            f"{xsens_name} -> {robot_link}: offset_wxyz=({offset_text}), offset_angle={offset_angle_deg:.2f} deg"
+        )
+    return tuple(lines)
 
 
 XSENS_AXIS_SPECS = (
@@ -238,9 +285,8 @@ def build_xsens_orientation_targets(
     segment_to_index = {name: idx for idx, name in enumerate(segment_names)}
 
     orientation_offsets = np.asarray(orientation_offsets_wijk, dtype=float)
-    if (
-        len(orientation_names) != len(orientation_robot_link_names)
-        or len(orientation_names) != len(orientation_offsets)
+    if len(orientation_names) != len(orientation_robot_link_names) or len(orientation_names) != len(
+        orientation_offsets
     ):
         raise ValueError("Calibration orientation mapping names, robot links, and offsets must have the same length")
     offset_rotations = quat_wijk_to_matrix(orientation_offsets)
@@ -271,6 +317,29 @@ def build_xsens_orientation_targets(
         axis_robot_end_link_names=axis_robot_end_link_names,
         axis_target_vectors=axis_targets,
         axis_weights=np.asarray(axis_weights, dtype=float),
+    )
+
+
+def build_xsens_orientation_targets_from_calibration(
+    calibration: XsensOrientationCalibration,
+    *,
+    motion_quaternions_wijk: np.ndarray,
+    segment_names: list[str],
+) -> XsensOrientationTargets:
+    """Create motion targets from shared Xsens orientation-calibration metadata."""
+
+    return build_xsens_orientation_targets(
+        orientation_names=calibration.active_orientation_mapping_names,
+        orientation_robot_link_names=calibration.robot_link_names,
+        orientation_offsets_wijk=calibration.orientation_offsets_wijk,
+        axis_names=calibration.axis_names,
+        axis_xsens_segment_names=calibration.axis_xsens_segment_names,
+        axis_local_tpose_xyz=calibration.axis_local_tpose_xyz,
+        axis_robot_start_link_names=calibration.axis_robot_start_link_names,
+        axis_robot_end_link_names=calibration.axis_robot_end_link_names,
+        axis_weights=calibration.axis_weights,
+        motion_quaternions_wijk=motion_quaternions_wijk,
+        segment_names=segment_names,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -28,6 +29,15 @@ from holosoma_retargeting.xsens.kinematic_model import build_xsens_kinematic_tre
 
 XsensGroundingMode = Literal["none", "match_lowest_soles"]
 _SOLE_SOURCE_BODY_NAMES = ("LeftFoot", "LeftToe", "RightFoot", "RightToe")
+
+
+@dataclass(frozen=True)
+class PreparedG1XsensMorphology:
+    """Reusable subject/target models and adapter for G1-proportioned Xsens poses."""
+
+    source_model: KinematicTree
+    target_model: KinematicTree
+    adapter: KinematicMorphologyAdapter
 
 
 def _body_to_source_mapping(
@@ -132,17 +142,22 @@ def build_subject_xsens_reference_model(
     return with_body_attachments(model, meshes=meshes)
 
 
-def adapt_xsens_motion_to_g1(
-    motion: XsensHdf5Motion,
+def prepare_g1_xsens_morphology(
+    source_segment_names: Sequence[str],
     *,
     hdf5_path: str | Path,
     g1_model_path: str | Path | None = None,
     grounding: XsensGroundingMode = "match_lowest_soles",
     preserve_joint_offsets: bool = False,
-) -> KinematicMotion:
-    """Reconstruct one body-only Xsens motion using G1-derived proportions."""
+) -> PreparedG1XsensMorphology:
+    """Build the direct subject-to-G1 Xsens morphology path used by retargeting.
 
-    source_names = tuple(motion.segment_names)
+    The resulting adapter performs no IK or optimization: it preserves every
+    source segment orientation (and thus every relative joint rotation) while
+    reconstructing body origins from the G1-sized tree's joint anchors.
+    """
+
+    source_names = tuple(source_segment_names)
     source_model = build_subject_xsens_reference_model(
         hdf5_path,
         include_tennis_racket=False,
@@ -161,9 +176,29 @@ def adapt_xsens_motion_to_g1(
         source_model=source_model if grounding == "match_lowest_soles" else None,
         grounding=grounding,
     )
-    return adapter.adapt_motion(
+    return PreparedG1XsensMorphology(source_model, target_model, adapter)
+
+
+def adapt_xsens_motion_to_g1(
+    motion: XsensHdf5Motion,
+    *,
+    hdf5_path: str | Path,
+    g1_model_path: str | Path | None = None,
+    grounding: XsensGroundingMode = "match_lowest_soles",
+    preserve_joint_offsets: bool = False,
+) -> KinematicMotion:
+    """Reconstruct one body-only Xsens motion using G1-derived proportions."""
+
+    prepared = prepare_g1_xsens_morphology(
+        motion.segment_names,
+        hdf5_path=hdf5_path,
+        g1_model_path=g1_model_path,
+        grounding=grounding,
+        preserve_joint_offsets=preserve_joint_offsets,
+    )
+    return prepared.adapter.adapt_motion(
         KinematicMotion(
-            source_names,
+            tuple(motion.segment_names),
             motion.positions_m,
             motion.quaternions_wijk,
             motion.times_s,
@@ -181,9 +216,11 @@ def xsens_body_to_source_mapping(
 
 
 __all__ = [
+    "PreparedG1XsensMorphology",
     "XsensGroundingMode",
     "adapt_xsens_motion_to_g1",
     "build_subject_xsens_reference_model",
     "build_xsens_morphology_adapter",
+    "prepare_g1_xsens_morphology",
     "xsens_body_to_source_mapping",
 ]

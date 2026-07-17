@@ -59,7 +59,8 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
 from holosoma_retargeting.xsens.morphology_adaptation import adapt_xsens_motion_to_g1  # noqa: E402
 from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
     XsensOrientationTargets,
-    build_xsens_orientation_targets,
+    build_xsens_orientation_targets_from_calibration,
+    describe_xsens_orientation_correspondences,
     load_xsens_orientation_targets,
 )
 from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
@@ -611,16 +612,8 @@ def load_orientation_targets_for_retargeting(
             verbose=0,
         ),
     )
-    return build_xsens_orientation_targets(
-        orientation_names=calibration.active_orientation_mapping_names,
-        orientation_robot_link_names=calibration.robot_link_names,
-        orientation_offsets_wijk=calibration.orientation_offsets_wijk,
-        axis_names=calibration.axis_names,
-        axis_xsens_segment_names=calibration.axis_xsens_segment_names,
-        axis_local_tpose_xyz=calibration.axis_local_tpose_xyz,
-        axis_robot_start_link_names=calibration.axis_robot_start_link_names,
-        axis_robot_end_link_names=calibration.axis_robot_end_link_names,
-        axis_weights=calibration.axis_weights,
+    return build_xsens_orientation_targets_from_calibration(
+        calibration,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
         segment_names=xsens_motion.segment_names,
     )
@@ -737,24 +730,13 @@ def describe_retargeting_setup(
         return tuple(lines)
 
     lines.extend(
-        [
-            "    R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset",
-            "    R_offset = R_Xsens_segment_Tpose_world^T @ R_G1_link_Tpose_world",
-        ]
-    )
-    for xsens_name, robot_link, offset in zip(
-        orientation_targets.orientation_names,
-        orientation_targets.orientation_robot_link_names,
-        orientation_targets.orientation_offsets_wijk,
-    ):
-        normalized_offset = np.asarray(offset, dtype=float)
-        normalized_offset /= max(float(np.linalg.norm(normalized_offset)), 1e-12)
-        offset_angle_deg = float(np.degrees(2.0 * np.arccos(np.clip(abs(normalized_offset[0]), 0.0, 1.0))))
-        offset_text = ", ".join(f"{value:+.6f}" for value in normalized_offset)
-        lines.append(
-            f"    {xsens_name} -> {robot_link}: offset_wxyz=({offset_text}), "
-            f"offset_angle={offset_angle_deg:.2f} deg"
+        f"    {line}"
+        for line in describe_xsens_orientation_correspondences(
+            orientation_targets.orientation_names,
+            orientation_targets.orientation_robot_link_names,
+            orientation_targets.orientation_offsets_wijk,
         )
+    )
     return tuple(lines)
 
 
