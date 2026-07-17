@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
@@ -64,6 +64,27 @@ def evaluate_mujoco_frame_poses(
         positions_m=np.asarray(positions, dtype=float).reshape(-1, 3),
         quaternions_wxyz=np.asarray(quaternions, dtype=float).reshape(-1, 4),
     )
+
+
+def replace_named_joint_qpos(
+    model_path: str | Path,
+    qpos: np.ndarray,
+    joint_values: Mapping[str, float],
+) -> np.ndarray:
+    """Return a qpos copy with selected scalar joints replaced by name."""
+
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    result = np.asarray(qpos, dtype=float).reshape(-1).copy()
+    if result.shape != (model.nq,):
+        raise ValueError(f"Expected qpos with shape ({model.nq},), got {result.shape}")
+    for joint_name, value in joint_values.items():
+        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        if joint_id < 0:
+            raise KeyError(f"No MuJoCo joint named '{joint_name}'")
+        if int(model.jnt_type[joint_id]) not in (mujoco.mjtJoint.mjJNT_HINGE, mujoco.mjtJoint.mjJNT_SLIDE):
+            raise ValueError(f"Joint '{joint_name}' is not scalar")
+        result[int(model.jnt_qposadr[joint_id])] = float(value)
+    return result
 
 
 def _mesh_local_vf(model, geom_id):

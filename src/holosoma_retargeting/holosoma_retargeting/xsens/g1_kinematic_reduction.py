@@ -22,10 +22,12 @@ from holosoma_retargeting.kinematics import (
 )
 from holosoma_retargeting.usd import create_usd_stage, validate_usd_kinematic_tree, write_kinematic_tree_to_stage
 from holosoma_retargeting.xsens.avatar_mesh import (
+    LIGHT_GRAY,
     AvatarMeshPart,
     XsensAvatarProportions,
     build_tennis_racket_meshes,
     build_xsens_avatar_meshes,
+    cylinder_between,
 )
 from holosoma_retargeting.xsens.kinematic_model import (
     TENNIS_RACKET_BODY,
@@ -35,7 +37,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "8"
+G1_XSENS_REDUCTION_VERSION = "9"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -68,6 +70,19 @@ class G1Anthropometry:
     region_extents_m: Mapping[str, np.ndarray]
     region_centers_m: Mapping[str, np.ndarray]
     segment_radii_m: Mapping[str, np.ndarray]
+
+
+@dataclass(frozen=True)
+class _ShoulderMorphologyFit:
+    """Fixed virtual-joint anchors fitted to canonical T- and N-pose endpoints."""
+
+    parent_anchor_m: np.ndarray
+    child_anchor_m: np.ndarray
+    tpose_target_offset_m: np.ndarray
+    npose_target_offset_m: np.ndarray
+    npose_child_rotation: np.ndarray
+    tpose_error_m: float
+    npose_error_m: float
 
 
 @dataclass(frozen=True)
@@ -489,21 +504,94 @@ def _canonical_upper_limb_offsets(anthropometry: G1Anthropometry) -> dict[str, n
     return result
 
 
+def _fit_collapsed_shoulder_morphology(
+    anthropometry: G1Anthropometry,
+    side: str,
+    sign: float,
+) -> _ShoulderMorphologyFit:
+    """Fit one virtual shoulder joint equally to canonical T- and N-poses.
+
+    With parent/child segment rotations ``R_s`` and ``R_u``, the reconstructed
+    shoulder-to-upper-arm offset is ``R_s p - R_u c``.  In the shoulder frame,
+    the two equally weighted calibration objectives are therefore::
+
+        p - c       = d_T
+        p - R_N c   = d_N
+
+    ``d_T`` is the full G1 shoulder edge-path length along the horizontal arm
+    axis. ``d_N`` is the neutral G1 shoulder-chain endpoint, and ``R_N`` rotates
+    the Xsens upper arm from horizontal to hanging vertically.  The least-
+    squares solution is fixed for the morphology and requires no per-frame IK.
+    """
+
+    shoulder_path_length = sum(
+        float(np.linalg.norm(edge))
+        for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
+    )
+    tpose_target = np.array([0.0, sign * shoulder_path_length, 0.0])
+    npose_target = _canonical_upper_limb_offsets(anthropometry)[f"{side}_shoulder"].copy()
+    # The extracted model is symmetric to sub-micron precision. Enforce exact
+    # sagittal symmetry instead of retaining numerical mesh-transform noise.
+    npose_target[0] = 0.0
+
+    angle = -sign * 0.5 * np.pi
+    cosine = float(np.cos(angle))
+    sine = float(np.sin(angle))
+    npose_child_rotation = np.array(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, cosine, -sine],
+            [0.0, sine, cosine],
+        ]
+    )
+    identity = np.eye(3)
+    design = np.vstack(
+        [
+            np.hstack([identity, -identity]),
+            np.hstack([identity, -npose_child_rotation]),
+        ]
+    )
+    targets = np.concatenate([tpose_target, npose_target])
+    solution, *_ = np.linalg.lstsq(design, targets, rcond=None)
+    parent_anchor = solution[:3]
+    child_anchor = solution[3:]
+    tpose_error = float(np.linalg.norm(parent_anchor - child_anchor - tpose_target))
+    npose_error = float(
+        np.linalg.norm(parent_anchor - npose_child_rotation @ child_anchor - npose_target)
+    )
+    return _ShoulderMorphologyFit(
+        parent_anchor_m=parent_anchor,
+        child_anchor_m=child_anchor,
+        tpose_target_offset_m=tpose_target,
+        npose_target_offset_m=npose_target,
+        npose_child_rotation=npose_child_rotation,
+        tpose_error_m=tpose_error,
+        npose_error_m=npose_error,
+    )
+
+
 def _collapsed_adapter_offsets(anthropometry: G1Anthropometry, preserve: bool) -> dict[str, np.ndarray]:
     """Keep cluster extent without retaining its separated-axis geometry.
 
-    Xsens shoulder and wrist segments carry the equivalent endpoint transform
-    of the collapsed G1 axis clusters. The pelvis-to-hip adapter retains its
-    scalar extent along the idealized leg axis. Spherical joints remain at the
-    downstream rigid-segment anchors, so independently measured rigid spans are
-    unchanged.
+    The Xsens shoulder joint uses fitted parent/child anchors so its endpoint
+    agrees with both canonical T- and N-pose G1 configurations.  Its reference
+    T-pose displacement is the G1 shoulder chain's full edge-path length along
+    the canonical arm axis.  The joint frames introduce the N-pose dependence.
+    Wrist segments retain their endpoint-equivalent transform because their
+    compound edges are already collinear.  The pelvis-to-hip adapter retains
+    its scalar extent along the idealized leg axis.  Spherical joints remain at
+    the downstream rigid-segment anchors, so independently measured rigid spans
+    are unchanged.
     """
 
     result = {name: np.zeros(3, dtype=float) for name in anthropometry.compound_offsets_m}
     if preserve:
         return result
-    result.update(_canonical_upper_limb_offsets(anthropometry))
-    for side in ("left", "right"):
+    endpoint_offsets = _canonical_upper_limb_offsets(anthropometry)
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        shoulder_fit = _fit_collapsed_shoulder_morphology(anthropometry, side, sign)
+        result[f"{side}_shoulder"] = shoulder_fit.tpose_target_offset_m
+        result[f"{side}_wrist"] = endpoint_offsets[f"{side}_wrist"]
         result[f"{side}_hip"] = np.array([0.0, 0.0, -np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_hip"])])
     return result
 
@@ -565,6 +653,9 @@ def _build_reference_layout(
         shoulder_root = positions["Neck"] + np.array([0.0, sign * anthropometry.widths_m["shoulder"] * 0.5, 0.0])
         positions[f"{title}Shoulder"] = shoulder_root
         positions[f"{title}UpperArm"] = shoulder_root + offsets[f"{side}_shoulder"] + adapters[f"{side}_shoulder"]
+        if not config.preserve_joint_offsets:
+            shoulder_fit = _fit_collapsed_shoulder_morphology(anthropometry, side, sign)
+            joint_centers[f"{title}Shoulder"] = shoulder_root + shoulder_fit.parent_anchor_m
         positions[f"{title}ForeArm"] = positions[f"{title}UpperArm"] + arm_direction * lengths["upper_arm"]
         wrist_center = positions[f"{title}ForeArm"] + arm_direction * lengths["forearm"]
         positions[f"{title}Hand"] = wrist_center + offsets[f"{side}_wrist"] + adapters[f"{side}_wrist"]
@@ -645,7 +736,10 @@ def _g1_xsens_avatar_proportions_from_layout(
         "LeftUpperLeg": ("jLeftKnee", "LeftLowerLeg"),
     }
     for segment, (landmark_name, child) in distal_specs.items():
-        landmarks[segment][landmark_name] = positions[child] - positions[segment]
+        if segment.endswith("Shoulder"):
+            landmarks[segment][landmark_name] = joint_centers[segment] - positions[segment]
+        else:
+            landmarks[segment][landmark_name] = positions[child] - positions[segment]
     for side in ("Right", "Left"):
         landmarks[f"{side}ForeArm"][f"j{side}Wrist"] = joint_centers[f"{side}Wrist"] - positions[f"{side}ForeArm"]
         landmarks[f"{side}LowerLeg"][f"j{side}Ankle"] = joint_centers[f"{side}Ankle"] - positions[f"{side}LowerLeg"]
@@ -895,7 +989,23 @@ def _shared_visual_attachments(
     neck_scale[:2] = neck_target / (neck_max[:2] - neck_min[:2])
     transforms["Neck"] = (neck_scale, np.zeros(3))
 
-    return {name: _scaled_part_attachments(parts, *transforms[name]) for name, parts in shared_parts.items()}
+    attachments = {
+        name: _scaled_part_attachments(parts, *transforms[name])
+        for name, parts in shared_parts.items()
+    }
+    adapter_radius = 0.72 * float(np.min(anthropometry.segment_radii_m["upper_arm"]))
+    for side in ("Left", "Right"):
+        upper_arm_name = f"{side}UpperArm"
+        child_anchor = joint_centers[f"{side}Shoulder"] - positions[upper_arm_name]
+        if np.linalg.norm(child_anchor) <= 1e-12:
+            continue
+        adapter_part = AvatarMeshPart(
+            f"{side.lower()}_shoulder_child_adapter",
+            cylinder_between(child_anchor, np.zeros(3), adapter_radius, sections=14),
+            LIGHT_GRAY,
+        )
+        attachments[upper_arm_name] += (_avatar_part_attachment(adapter_part),)
+    return attachments
 
 
 def build_g1_proportioned_xsens_tree(

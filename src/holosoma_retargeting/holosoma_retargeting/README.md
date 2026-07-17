@@ -194,16 +194,18 @@ Thus, `--actor-modes all` uses Y offsets `-2`, `0`, and `+2` metres respectively
 `--actor-spacing-m 1.5`, or use `--actor-spacing-m 0` to overlay the selected actors around the recorded trajectory.
 
 To inspect the proportions directly, render the human-subject Xsens avatar, the generated G1-proportioned Xsens
-avatar, and the physical G1 side-by-side in the same Xsens T-pose:
+avatar, and the physical G1 side-by-side in canonical T- and N-poses:
 
 ```bash
-python examples/xsens_tennis/compare_xsens_g1_tpose.py \
+python examples/xsens_tennis/compare_xsens_g1_poses.py \
     --hdf5-path demo_data/xsens_tennis/2026-06-14_tennis_S02_xsens_myo_data_02.hdf5
 ```
 
 The script generates the human-subject avatar USD when `--calibrated-xsens-usd-path` is omitted, solves the physical
-G1 T-pose from the same recording, ground-aligns all three models independently, and opens a frontal Viser view.
-Pass `--preserve-joint-offsets` to compare the offset-preserving G1 Xsens variant instead.
+G1 T-pose from the same recording, constructs a hanging-arm N-pose from the same calibrated configuration,
+ground-aligns all three models independently, and opens a frontal Viser view. Use the **Reference pose** selector in
+the sidebar to switch all three actors together. Pass `--preserve-joint-offsets` to compare the offset-preserving G1
+Xsens variant instead. The previous `compare_xsens_g1_tpose.py` command remains as a compatibility wrapper.
 
 ### Calibrate and visualize the retargeted G1 T-pose
 

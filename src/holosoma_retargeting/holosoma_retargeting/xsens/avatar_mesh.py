@@ -142,7 +142,9 @@ def _ellipsoid(center: np.ndarray, radii: tuple[float, float, float], subdivisio
     return mesh
 
 
-def _cylinder_between(start: np.ndarray, end: np.ndarray, radius: float, sections: int = 12) -> trimesh.Trimesh:
+def cylinder_between(start: np.ndarray, end: np.ndarray, radius: float, sections: int = 12) -> trimesh.Trimesh:
+    """Create a cylinder aligned between two points in local coordinates."""
+
     start = np.asarray(start, dtype=float)
     end = np.asarray(end, dtype=float)
     direction = end - start
@@ -581,7 +583,7 @@ def _build_leg_parts(
         AvatarMeshPart(f"{segment.lower()}_shell", shell, MID_GRAY),
         AvatarMeshPart(
             f"{segment.lower()}_outer_stripe",
-            _cylinder_between(accent_start, accent_end, 0.0045, sections=8),
+            cylinder_between(accent_start, accent_end, 0.0045, sections=8),
             ACCENT_ORANGE,
             "accent",
         ),
@@ -801,7 +803,7 @@ def _ellipse_tube(
         for theta in np.linspace(0.0, 2.0 * np.pi, sections, endpoint=False)
     ]
     cylinders = [
-        _cylinder_between(points[i], points[(i + 1) % sections], tube_radius, sections=8) for i in range(sections)
+        cylinder_between(points[i], points[(i + 1) % sections], tube_radius, sections=8) for i in range(sections)
     ]
     return trimesh.util.concatenate(cylinders)
 
@@ -815,10 +817,10 @@ def build_tennis_racket_meshes() -> tuple[AvatarMeshPart, ...]:
     horizontal in the resulting world-space T-pose.
     """
 
-    handle = _cylinder_between(np.array([-0.09, 0.0, 0.0]), np.array([0.09, 0.0, 0.0]), 0.018, sections=10)
-    shaft = _cylinder_between(np.array([0.09, 0.0, 0.0]), np.array([0.25, 0.0, 0.0]), 0.009, sections=10)
-    throat_left = _cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, 0.075, 0.0]), 0.008, sections=8)
-    throat_right = _cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, -0.075, 0.0]), 0.008, sections=8)
+    handle = cylinder_between(np.array([-0.09, 0.0, 0.0]), np.array([0.09, 0.0, 0.0]), 0.018, sections=10)
+    shaft = cylinder_between(np.array([0.09, 0.0, 0.0]), np.array([0.25, 0.0, 0.0]), 0.009, sections=10)
+    throat_left = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, 0.075, 0.0]), 0.008, sections=8)
+    throat_right = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, -0.075, 0.0]), 0.008, sections=8)
     hoop_center = np.array([0.415, 0.0, 0.0])
     hoop_radii = (0.175, 0.135)
     hoop = _ellipse_tube(hoop_center, hoop_radii, 0.009)
@@ -828,7 +830,7 @@ def build_tennis_racket_meshes() -> tuple[AvatarMeshPart, ...]:
     for x_offset in np.linspace(-0.135, 0.135, 11):
         y_extent = hoop_radii[1] * np.sqrt(max(0.0, 1.0 - (x_offset / hoop_radii[0]) ** 2)) * 0.92
         strings.append(
-            _cylinder_between(
+            cylinder_between(
                 hoop_center + np.array([x_offset, -y_extent, 0.0]),
                 hoop_center + np.array([x_offset, y_extent, 0.0]),
                 0.0011,
@@ -838,7 +840,7 @@ def build_tennis_racket_meshes() -> tuple[AvatarMeshPart, ...]:
     for y_offset in np.linspace(-0.105, 0.105, 9):
         x_extent = hoop_radii[0] * np.sqrt(max(0.0, 1.0 - (y_offset / hoop_radii[1]) ** 2)) * 0.92
         strings.append(
-            _cylinder_between(
+            cylinder_between(
                 hoop_center + np.array([-x_extent, y_offset, 0.0]),
                 hoop_center + np.array([x_extent, y_offset, 0.0]),
                 0.0011,

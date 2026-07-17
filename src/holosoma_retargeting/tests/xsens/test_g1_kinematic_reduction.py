@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Motion
 from holosoma_retargeting.kinematics import (
+    KinematicMotion,
     KinematicPose,
     compute_reference_joint_positions,
     validate_kinematic_tree,
@@ -20,6 +21,7 @@ from holosoma_retargeting.xsens.avatar_mesh import build_xsens_avatar_meshes
 from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     G1Anthropometry,
     G1XsensReductionConfig,
+    _fit_collapsed_shoulder_morphology,
     build_g1_proportioned_xsens_tree,
     export_g1_proportioned_xsens_usd,
     extract_g1_anthropometry,
@@ -154,13 +156,15 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
         wrist_offset = bodies[f"{title}Hand"].reference_pose.translation_m - reference_joints[f"{title}Wrist"]
         shoulder_offsets[side] = shoulder_offset
 
+        expected_shoulder_length = sum(
+            np.linalg.norm(edge)
+            for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
+        )
         np.testing.assert_allclose(
-            np.linalg.norm(shoulder_offset),
-            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]),
+            shoulder_offset,
+            [0.0, sign * expected_shoulder_length, 0.0],
             atol=1e-12,
         )
-        assert sign * shoulder_offset[1] > 0.0
-        assert shoulder_offset[2] < -0.1
         np.testing.assert_allclose(
             np.linalg.norm(wrist_offset),
             np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_wrist"]),
@@ -174,13 +178,9 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
         bodies["LeftUpperArm"].reference_pose.translation_m - bodies["RightUpperArm"].reference_pose.translation_m
     )
     expected_span = anthropometry.widths_m["shoulder"] + shoulder_offsets["left"][1] - shoulder_offsets["right"][1]
-    scalarized_span = anthropometry.widths_m["shoulder"] + sum(
-        np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]) for side in ("left", "right")
-    )
     np.testing.assert_allclose(upper_arm_span, expected_span, atol=1e-12)
-    assert upper_arm_span < scalarized_span - 0.1
 
-    np.testing.assert_allclose(joints["LeftShoulder"].child_frame.translation_m, np.zeros(3))
+    assert np.linalg.norm(joints["LeftShoulder"].child_frame.translation_m) > 0.0
     np.testing.assert_allclose(joints["LeftHip"].child_frame.translation_m, np.zeros(3))
     np.testing.assert_allclose(joints["LeftAnkle"].child_frame.translation_m, np.zeros(3))
     for name, value in _rigid_lengths(model).items():
@@ -255,6 +255,9 @@ def test_joint_collars_remain_on_segment_axes_after_visual_scaling(
             body_name: bodies[child_name].reference_pose.translation_m - bodies[body_name].reference_pose.translation_m
             for body_name, child_name in endpoint_bodies.items()
         }
+        endpoints[f"{side}Shoulder"] = (
+            joints[f"{side}Shoulder"] - bodies[f"{side}Shoulder"].reference_pose.translation_m
+        )
         endpoints[f"{side}LowerLeg"] = joints[f"{side}Ankle"] - bodies[f"{side}LowerLeg"].reference_pose.translation_m
 
         for body_name, endpoint in endpoints.items():
@@ -381,8 +384,13 @@ def test_all_standard_visuals_come_from_shared_calibrated_avatar_factory(
     for body_name in proportions.segment_names:
         generated_meshes = model.body_map()[body_name].meshes
         shared_parts = shared[body_name]
-        assert [mesh.name for mesh in generated_meshes] == [part.name for part in shared_parts]
-        for mesh, part in zip(generated_meshes, shared_parts, strict=True):
+        standard_meshes = [mesh for mesh in generated_meshes if not mesh.name.endswith("_shoulder_child_adapter")]
+        assert [mesh.name for mesh in standard_meshes] == [part.name for part in shared_parts]
+        if body_name.endswith("UpperArm"):
+            assert len(generated_meshes) == len(shared_parts) + 1
+        else:
+            assert len(generated_meshes) == len(shared_parts)
+        for mesh, part in zip(standard_meshes, shared_parts, strict=True):
             np.testing.assert_array_equal(mesh.faces, part.mesh.faces)
             assert mesh.color_rgb == part.color
             assert mesh.category == part.category
@@ -493,6 +501,81 @@ def test_xsens_morphology_adapter_preserves_order_and_target_anchors(
         np.testing.assert_allclose(parent_anchor, child_anchor, atol=5e-6)
 
 
+def test_collapsed_shoulder_joint_frames_satisfy_t_and_n_pose_objectives(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(include_tennis_racket=False),
+    )
+    joints = model.joint_map()
+
+    for side, title, sign in (("left", "Left", 1.0), ("right", "Right", -1.0)):
+        fit = _fit_collapsed_shoulder_morphology(anthropometry, side, sign)
+        joint = joints[f"{title}Shoulder"]
+        np.testing.assert_allclose(joint.parent_frame.translation_m, fit.parent_anchor_m, atol=1e-12)
+        np.testing.assert_allclose(joint.child_frame.translation_m, fit.child_anchor_m, atol=1e-12)
+        np.testing.assert_allclose(
+            fit.parent_anchor_m - fit.child_anchor_m,
+            fit.tpose_target_offset_m,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            fit.parent_anchor_m - fit.npose_child_rotation @ fit.child_anchor_m,
+            fit.npose_target_offset_m,
+            atol=1e-12,
+        )
+        assert fit.tpose_error_m < 1e-12
+        assert fit.npose_error_m < 1e-12
+
+
+def test_collapsed_shoulder_adapter_interpolates_t_to_n_pose_over_motion(
+    anthropometry: G1Anthropometry,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(include_tennis_racket=False),
+    )
+    source_names = tuple(str(body.metadata["xsens:sourceSegmentName"]) for body in model.bodies)
+    source_indices = {name: index for index, name in enumerate(source_names)}
+    adapter = build_xsens_morphology_adapter(model, source_names)
+    frame_count = 9
+    reference_positions = np.stack([body.reference_pose.translation_m for body in model.bodies])
+    positions = np.repeat(reference_positions[None, :, :], frame_count, axis=0)
+    orientations = np.zeros((frame_count, len(source_names), 4), dtype=float)
+    orientations[..., 0] = 1.0
+    elevation = np.linspace(0.0, 0.5 * np.pi, frame_count)
+    for title, sign in (("Left", 1.0), ("Right", -1.0)):
+        upper_arm_index = source_indices[f"{title}UpperArm"]
+        angles = -sign * elevation
+        orientations[:, upper_arm_index, 0] = np.cos(0.5 * angles)
+        orientations[:, upper_arm_index, 1] = np.sin(0.5 * angles)
+    times_s = np.arange(frame_count, dtype=float) / 30.0
+
+    adapted = adapter.adapt_motion(
+        KinematicMotion(source_names, positions, orientations, times_s)
+    )
+
+    for side, title, sign in (("left", "Left", 1.0), ("right", "Right", -1.0)):
+        shoulder_index = source_indices[f"{title}Shoulder"]
+        upper_arm_index = source_indices[f"{title}UpperArm"]
+        joint = model.joint_map()[f"{title}Shoulder"]
+        rotated_child_anchors = np.stack(
+            [
+                rotate_vector(orientation, joint.child_frame.translation_m)
+                for orientation in orientations[:, upper_arm_index]
+            ]
+        )
+        expected_offsets = joint.parent_frame.translation_m - rotated_child_anchors
+        actual_offsets = adapted.positions_m[:, upper_arm_index] - adapted.positions_m[:, shoulder_index]
+        fit = _fit_collapsed_shoulder_morphology(anthropometry, side, sign)
+        np.testing.assert_allclose(actual_offsets, expected_offsets, atol=1e-12)
+        np.testing.assert_allclose(actual_offsets[0], fit.tpose_target_offset_m, atol=1e-12)
+        np.testing.assert_allclose(actual_offsets[-1], fit.npose_target_offset_m, atol=1e-12)
+    np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
+    np.testing.assert_array_equal(adapted.times_s, times_s)
+
+
 def test_xsens_lowest_sole_grounding_uses_shared_avatar_outsoles(
     anthropometry: G1Anthropometry,
 ) -> None:
@@ -513,7 +596,10 @@ def test_xsens_lowest_sole_grounding_uses_shared_avatar_outsoles(
     np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
 
 
-def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_path) -> None:
+def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(
+    tmp_path,
+    anthropometry: G1Anthropometry,
+) -> None:
     pytest.importorskip("pxr")
     output_path = tmp_path / "g1_proportioned_xsens.usda"
     report = export_g1_proportioned_xsens_usd(
@@ -533,7 +619,14 @@ def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_pat
     assert payload["raw_offset_edge_frame"] == "parent_body_local"
     assert len(payload["raw_offset_edges_m"]["left_wrist"]) == 2
     assert np.linalg.norm(payload["root_anchors_m"]["left_hip"]) > 0.0
-    assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_shoulder"]) > 0.0
+    expected_shoulder_path_length = sum(
+        np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m["left_shoulder"]
+    )
+    np.testing.assert_allclose(
+        payload["collapsed_adapter_offsets_m"]["left_shoulder"],
+        [0.0, expected_shoulder_path_length, 0.0],
+        atol=1e-12,
+    )
     assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_wrist"]) > 0.0
     assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_hip"]) > 0.0
     assert all(np.linalg.norm(value) == 0.0 for value in payload["applied_offsets_m"].values())
