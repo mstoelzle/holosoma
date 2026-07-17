@@ -121,8 +121,8 @@ class XsensViserConfig(ViserConfig):
     g1_xsens_usd: str | None = None
     """G1-proportioned Xsens USDA override; defaults to the packaged demo result."""
 
-    g1_xsens_composition_offset_m: tuple[float, float, float] = (1.5, 0.0, 0.0)
-    """Root xyz offset applied to g1_xsens when both Xsens avatar variants are shown."""
+    actor_spacing_m: float = 2.0
+    """Lateral center-to-center spacing for the centered side-by-side actor layout."""
 
     xsens_target_fps: float | None = None
     """Optional HDF5 pre-sampling rate. None preserves the native timestamps."""

@@ -178,10 +178,10 @@ for example, `--actor-modes xsens g1_xsens` renders both avatar proportions from
 Any selection containing `xsens` or `g1_xsens` requires `--xsens-hdf5`; a selection containing `robot` also reads
 `--qpos-npz`. When data sources are combined, the Xsens timestamps are the master clock.
 
-Because the two Xsens variants share the same pelvis trajectory, composing them would otherwise overlap. When
-both are selected, the player therefore shifts the `g1_xsens` scene root by `(1.5, 0, 0)` metres for comparison.
-Override this with, for example, `--g1-xsens-composition-offset-m 0 2 0`; use `0 0 0` to compare the two skeletons
-around the same recorded pelvis position.
+The active actors are placed on a centered lateral line by default, matching the T-pose comparison layout. Their
+order is human-subject Xsens, G1-proportioned Xsens, then physical G1, with `2.0` metres of center-to-center spacing.
+Thus, `--actor-modes all` uses Y offsets `-2`, `0`, and `+2` metres respectively. Change the distance with
+`--actor-spacing-m 1.5`, or use `--actor-spacing-m 0` to overlay the selected actors around the recorded trajectory.
 
 To inspect the proportions directly, render the human-subject Xsens avatar, the generated G1-proportioned Xsens
 avatar, and the physical G1 side-by-side in the same Xsens T-pose:

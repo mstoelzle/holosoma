@@ -71,6 +71,7 @@ def _nominal_fps(times_s: np.ndarray, fallback: float) -> float:
 
 ActorMode = Literal["robot", "xsens", "g1_xsens"]
 ACTOR_MODE_ORDER: tuple[ActorMode, ...] = ("robot", "xsens", "g1_xsens")
+ACTOR_LAYOUT_ORDER: tuple[ActorMode, ...] = ("xsens", "g1_xsens", "robot")
 
 
 def resolve_actor_modes(actor_modes: Sequence[str]) -> tuple[ActorMode, ...]:
@@ -88,24 +89,43 @@ def resolve_actor_modes(actor_modes: Sequence[str]) -> tuple[ActorMode, ...]:
     return tuple(mode for mode in ACTOR_MODE_ORDER if mode in requested)
 
 
-def resolve_xsens_actor_offsets(
+def resolve_actor_offsets(
     actor_modes: Sequence[str],
-    g1_xsens_composition_offset_m: Sequence[float],
+    spacing_m: float,
 ) -> dict[ActorMode, np.ndarray]:
-    """Return visual root offsets while preserving each actor's local HDF5 poses."""
+    """Center active actors laterally in human, G1-avatar, physical-G1 order."""
 
-    active_modes = resolve_actor_modes(actor_modes)
-    configured_offset = np.asarray(g1_xsens_composition_offset_m, dtype=float)
-    if configured_offset.shape != (3,) or not np.isfinite(configured_offset).all():
-        raise ValueError("g1_xsens_composition_offset_m must contain three finite xyz values")
-    offsets = {
-        mode: np.zeros(3, dtype=float)
-        for mode in active_modes
-        if mode in {"xsens", "g1_xsens"}
+    spacing = float(spacing_m)
+    if not np.isfinite(spacing) or spacing < 0.0:
+        raise ValueError("actor_spacing_m must be a finite non-negative value")
+    active_modes = set(resolve_actor_modes(actor_modes))
+    layout_modes = tuple(mode for mode in ACTOR_LAYOUT_ORDER if mode in active_modes)
+    center_index = 0.5 * (len(layout_modes) - 1)
+    return {
+        mode: np.array([0.0, (index - center_index) * spacing, 0.0])
+        for index, mode in enumerate(layout_modes)
     }
-    if "xsens" in offsets and "g1_xsens" in offsets:
-        offsets["g1_xsens"] = configured_offset
-    return offsets
+
+
+def offset_qpos_positions(
+    qpos: np.ndarray,
+    offset_m: Sequence[float],
+    *,
+    has_object_input: bool,
+) -> np.ndarray:
+    """Translate displayed robot and object roots without changing source motion."""
+
+    motion = np.asarray(qpos, dtype=float)
+    offset = np.asarray(offset_m, dtype=float)
+    if motion.ndim != 2 or motion.shape[1] < 7:
+        raise ValueError("qpos must have shape [frames, values] with a floating base")
+    if offset.shape != (3,) or not np.isfinite(offset).all():
+        raise ValueError("Actor offset must contain three finite xyz values")
+    result = motion.copy()
+    result[:, 0:3] += offset
+    if has_object_input:
+        result[:, -7:-4] += offset
+    return result
 
 
 def resolve_record_output_path(config: ViserConfig) -> str:
@@ -325,10 +345,13 @@ def make_player(
     actor_modes = resolve_actor_modes(xsens_config.actor_modes if xsens_config is not None else ("robot",))
     show_robot = "robot" in actor_modes
     show_xsens = "xsens" in actor_modes or "g1_xsens" in actor_modes
-    xsens_actor_offsets = resolve_xsens_actor_offsets(
+    actor_offsets = resolve_actor_offsets(
         actor_modes,
-        xsens_config.g1_xsens_composition_offset_m if xsens_config is not None else (0.0, 0.0, 0.0),
+        xsens_config.actor_spacing_m if xsens_config is not None else 0.0,
     )
+    xsens_actor_offsets = {
+        mode: offset for mode, offset in actor_offsets.items() if mode in {"xsens", "g1_xsens"}
+    }
     record_output_path = resolve_record_output_path(config)
     if show_robot and qpos is None:
         raise ValueError(f"actor_modes={actor_modes} requires qpos motion for the robot actor")
@@ -428,6 +451,12 @@ def make_player(
             actor.root.position = xsens_actor_offsets[mode]
 
     contains_object = bool(qpos is not None and robot_applier is not None and robot_applier.has_object_input(qpos))
+    if qpos is not None and "robot" in actor_offsets:
+        qpos = offset_qpos_positions(
+            qpos,
+            actor_offsets["robot"],
+            has_object_input=contains_object,
+        )
     xsens_ground_positions = None
     if show_xsens and xsens_motion is not None:
         xsens_ground_positions = np.concatenate(
@@ -456,7 +485,7 @@ def make_player(
         f"[viser_player] ground center=({ground.center_xy[0]:.3f}, {ground.center_xy[1]:.3f}) | "
         f"extent=({ground.width:.3f}, {ground.height:.3f}) m"
     )
-    for mode, offset in xsens_actor_offsets.items():
+    for mode, offset in actor_offsets.items():
         print(f"[viser_player] {mode} root offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}) m")
     if "g1_xsens" in xsens_actors:
         print("[viser_player] g1_xsens grounding=dynamic lowest-sole matching")

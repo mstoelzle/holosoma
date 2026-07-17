@@ -16,9 +16,10 @@ from holosoma_retargeting.viser_player import (
     compute_camera_follow_target,
     compute_ground_plane_bounds,
     compute_initial_camera_view,
+    offset_qpos_positions,
     resolve_actor_modes,
+    resolve_actor_offsets,
     resolve_record_output_path,
-    resolve_xsens_actor_offsets,
 )
 
 
@@ -116,6 +117,7 @@ def test_xsens_options_are_not_part_of_global_viser_config() -> None:
     assert not hasattr(base, "show_tennis_racket")
     assert xsens.actor_modes == ("xsens", "g1_xsens")
     assert xsens.xsens_hdf5 == "motion.hdf5"
+    assert xsens.actor_spacing_m == 2.0
     assert xsens.show_tennis_racket is True
     assert isinstance(get_default_xsens_viser_config(), XsensViserConfig)
 
@@ -226,20 +228,42 @@ def test_actor_modes_reject_empty_and_unknown_selections() -> None:
         resolve_actor_modes(("not_an_actor",))
 
 
-def test_g1_xsens_composition_offset_only_separates_the_paired_avatars() -> None:
-    single = resolve_xsens_actor_offsets(("g1_xsens",), (1.5, 0.0, 0.0))
-    paired = resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (1.5, -0.25, 0.0))
+def test_actor_offsets_equally_space_all_actors_along_a_centered_line() -> None:
+    offsets = resolve_actor_offsets(("all",), 2.0)
 
+    assert tuple(offsets) == ("xsens", "g1_xsens", "robot")
+    np.testing.assert_array_equal(offsets["xsens"], [0.0, -2.0, 0.0])
+    np.testing.assert_array_equal(offsets["g1_xsens"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(offsets["robot"], [0.0, 2.0, 0.0])
+
+
+def test_actor_offsets_center_subsets_and_single_actors() -> None:
+    paired = resolve_actor_offsets(("xsens", "robot"), 2.0)
+    single = resolve_actor_offsets(("g1_xsens",), 2.0)
+
+    np.testing.assert_array_equal(paired["xsens"], [0.0, -1.0, 0.0])
+    np.testing.assert_array_equal(paired["robot"], [0.0, 1.0, 0.0])
     np.testing.assert_array_equal(single["g1_xsens"], [0.0, 0.0, 0.0])
-    np.testing.assert_array_equal(paired["xsens"], [0.0, 0.0, 0.0])
-    np.testing.assert_array_equal(paired["g1_xsens"], [1.5, -0.25, 0.0])
 
 
-def test_g1_xsens_composition_offset_requires_finite_xyz() -> None:
-    with pytest.raises(ValueError, match="three finite xyz"):
-        resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (1.0, 2.0))
-    with pytest.raises(ValueError, match="three finite xyz"):
-        resolve_xsens_actor_offsets(("xsens", "g1_xsens"), (np.nan, 0.0, 0.0))
+def test_actor_spacing_requires_a_finite_non_negative_value() -> None:
+    with pytest.raises(ValueError, match="finite non-negative"):
+        resolve_actor_offsets(("all",), -1.0)
+    with pytest.raises(ValueError, match="finite non-negative"):
+        resolve_actor_offsets(("all",), np.nan)
+
+
+def test_qpos_offset_translates_robot_and_tracked_object() -> None:
+    qpos = np.zeros((2, 7 + 2 + 7))
+    qpos[:, 0:3] = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]
+    qpos[:, -7:-4] = [[7.0, 8.0, 9.0], [10.0, 11.0, 12.0]]
+
+    shifted = offset_qpos_positions(qpos, (0.0, 2.0, 0.0), has_object_input=True)
+
+    np.testing.assert_array_equal(qpos[:, 0:3], [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    np.testing.assert_array_equal(shifted[:, 0:3], [[1.0, 4.0, 3.0], [4.0, 7.0, 6.0]])
+    np.testing.assert_array_equal(shifted[:, -7:-4], [[7.0, 10.0, 9.0], [10.0, 13.0, 12.0]])
+    np.testing.assert_array_equal(shifted[:, 3:-7], qpos[:, 3:-7])
 
 
 def test_robot_ground_bounds_include_base_and_tracked_object() -> None:
