@@ -106,10 +106,12 @@ The G1-proportioned mode defaults to collapsed compound-joint offsets and dynami
 these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.grounding none`; use
 `--xsens-morphology.g1-model-path <model.xml>` to measure proportions from a non-default G1 MuJoCo model.
 
-This default path also calibrates global Xsens segment frames against the corresponding G1 link frames using the
-recording's T-pose, then tracks torso, head, foot, and hand orientations during optimization. Supply an existing
-artifact with `--retargeter.orientation.calibration-path <calibration.npz>` to skip the in-memory calibration, or
-use `--xsens-morphology.no-track-orientations` for the legacy position-only optimizer.
+This default path also reconstructs the recording's T-pose with G1 proportions and uses those positions at scale
+`1.0` to solve the physical G1 orientation-calibration pose. The recorded global Xsens segment orientations are
+copied unchanged, then calibrated against the corresponding G1 link frames so torso, head, foot, and hand
+orientations can be tracked during optimization. Direct mode retains the previous human-height-scaled calibration.
+Supply an existing artifact with `--retargeter.orientation.calibration-path <calibration.npz>` to skip the in-memory
+calibration, or use `--xsens-morphology.no-track-orientations` for the position-only optimizer.
 
 For sparse debugging, `--motion-data-config.frame-indices 100 250 400` selects post-resampling frames and treats
 them as a uniformly timed storyboard. Use the same indices in `viser_player.py` with `--xsens-target-fps 30` and

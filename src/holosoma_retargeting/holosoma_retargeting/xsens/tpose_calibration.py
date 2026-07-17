@@ -82,8 +82,7 @@ ARM_COLLINEARITY_TARGETS = (
 )
 
 FOOT_CONTACT_GEOMS = {
-    side: tuple(f"{side}_ankle_roll_sphere_{index}_link" for index in range(1, 6))
-    for side in ("left", "right")
+    side: tuple(f"{side}_ankle_roll_sphere_{index}_link" for index in range(1, 6)) for side in ("left", "right")
 }
 
 LEG_ALIGNMENT_TARGETS = (
@@ -158,9 +157,7 @@ class XsensTposeCalibrationConfig:
     active_position_error_threshold_m: float = 0.15
     head_axis_error_threshold_deg: float = 15.0
     head_orientation_offset_threshold_deg: float = 140.0
-    candidate_orientation_mapping: dict[str, str] = field(
-        default_factory=lambda: dict(CANDIDATE_ORIENTATION_MAPPING)
-    )
+    candidate_orientation_mapping: dict[str, str] = field(default_factory=lambda: dict(CANDIDATE_ORIENTATION_MAPPING))
 
 
 @dataclass(frozen=True)
@@ -338,15 +335,9 @@ class _G1CalibrationProblem:
             for i in range(model.njnt)
             if model.joint(i).name and model.jnt_qposadr[i] >= 7
         }
-        self.joint_name_to_id = {
-            model.joint(i).name: i for i in range(model.njnt) if model.joint(i).name
-        }
-        self.body_name_to_id = {
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i): i for i in range(model.nbody)
-        }
-        self.geom_name_to_id = {
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i): i for i in range(model.ngeom)
-        }
+        self.joint_name_to_id = {model.joint(i).name: i for i in range(model.njnt) if model.joint(i).name}
+        self.body_name_to_id = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i): i for i in range(model.nbody)}
+        self.geom_name_to_id = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i): i for i in range(model.ngeom)}
         self.nominal_half_hip_width = self._compute_nominal_half_hip_width()
         self.straight_elbow_qpos = self._compute_straight_elbow_qpos()
         self.nominal_qpos = self._initial_qpos()
@@ -396,7 +387,14 @@ class _G1CalibrationProblem:
             elbow_qadr = self._joint_qpos_index(elbow_joint)
             lower, upper = self.model.jnt_range[elbow_id]
 
-            def collinearity_error(elbow_angle: float) -> float:
+            def collinearity_error(
+                elbow_angle: float,
+                *,
+                elbow_qadr: int = elbow_qadr,
+                shoulder_joint: str = shoulder_joint,
+                elbow_joint: str = elbow_joint,
+                wrist_joint: str = wrist_joint,
+            ) -> float:
                 reference_qpos[elbow_qadr] = elbow_angle
                 self.set_qpos(reference_qpos)
                 upper_axis = _normalize(
@@ -540,21 +538,13 @@ class _G1CalibrationProblem:
             target_lateral = base_lateral + side_sign * self.nominal_half_hip_width
             knee_offset = float(np.dot(knee_position, lateral) - target_lateral)
             foot_offset = float(np.dot(foot_center, lateral) - target_lateral)
-            residuals.append(
-                np.array([np.sqrt(self.config.knee_alignment_weight) * knee_offset])
-            )
-            residuals.append(
-                np.array([np.sqrt(self.config.foot_stance_weight) * foot_offset])
-            )
+            residuals.append(np.array([np.sqrt(self.config.knee_alignment_weight) * knee_offset]))
+            residuals.append(np.array([np.sqrt(self.config.foot_stance_weight) * foot_offset]))
             upper_leg_axis = _normalize(knee_position - hip_position, down)
             lower_leg_axis = _normalize(ankle_position - knee_position, down)
             full_leg_axis = _normalize(ankle_position - hip_position, down)
-            residuals.append(
-                np.sqrt(self.config.leg_collinearity_weight) * (lower_leg_axis - upper_leg_axis)
-            )
-            residuals.append(
-                np.sqrt(self.config.leg_verticality_weight) * (full_leg_axis - down)
-            )
+            residuals.append(np.sqrt(self.config.leg_collinearity_weight) * (lower_leg_axis - upper_leg_axis))
+            residuals.append(np.sqrt(self.config.leg_verticality_weight) * (full_leg_axis - down))
 
     def _append_axis_residuals(self, residuals: list[np.ndarray]) -> None:
         for source_a, source_b, link_a, link_b, _name in LIMB_AXIS_TARGETS:
@@ -603,30 +593,28 @@ class _G1CalibrationProblem:
             "left_knee_joint",
             "right_knee_joint",
         )
-        for joint_name in straight_joint_names:
-            residuals.append(
-                np.array([np.sqrt(self.config.straightness_weight) * qpos[self._joint_qpos_index(joint_name)]])
-            )
+        residuals.extend(
+            np.array([np.sqrt(self.config.straightness_weight) * qpos[self._joint_qpos_index(joint_name)]])
+            for joint_name in straight_joint_names
+        )
 
         for joint_name, straight_qpos in self.straight_elbow_qpos.items():
             elbow_qpos = qpos[self._joint_qpos_index(joint_name)]
-            residuals.append(
-                np.array([np.sqrt(self.config.straightness_weight) * (elbow_qpos - straight_qpos)])
-            )
+            residuals.append(np.array([np.sqrt(self.config.straightness_weight) * (elbow_qpos - straight_qpos)]))
 
         for side in ("left", "right"):
             ankle_roll = qpos[self._joint_qpos_index(f"{side}_ankle_roll_joint")]
-            residuals.append(
-                np.array([np.sqrt(self.config.ankle_roll_neutral_weight) * ankle_roll])
-            )
+            residuals.append(np.array([np.sqrt(self.config.ankle_roll_neutral_weight) * ankle_roll]))
 
         waist_joint_names = (
             "waist_yaw_joint",
             "waist_roll_joint",
             "waist_pitch_joint",
         )
-        for joint_name in waist_joint_names:
-            residuals.append(np.array([np.sqrt(self.config.nominal_weight) * qpos[self._joint_qpos_index(joint_name)]]))
+        residuals.extend(
+            np.array([np.sqrt(self.config.nominal_weight) * qpos[self._joint_qpos_index(joint_name)]])
+            for joint_name in waist_joint_names
+        )
 
         wrist_joint_names = (
             "left_wrist_roll_joint",
@@ -636,10 +624,10 @@ class _G1CalibrationProblem:
             "right_wrist_pitch_joint",
             "right_wrist_yaw_joint",
         )
-        for joint_name in wrist_joint_names:
-            residuals.append(
-                np.array([np.sqrt(self.config.wrist_neutral_weight) * qpos[self._joint_qpos_index(joint_name)]])
-            )
+        residuals.extend(
+            np.array([np.sqrt(self.config.wrist_neutral_weight) * qpos[self._joint_qpos_index(joint_name)]])
+            for joint_name in wrist_joint_names
+        )
 
         for left_joint, right_joint, sign in MIRRORED_JOINT_PAIRS:
             left_value = qpos[self._joint_qpos_index(left_joint)]
@@ -658,9 +646,7 @@ class _G1CalibrationProblem:
         for side in FOOT_CONTACT_GEOMS:
             foot_forward, foot_up = self._foot_sole_axes(side)
             residuals.append(np.sqrt(self.config.foot_flat_weight) * (foot_up - up))
-            residuals.append(
-                np.sqrt(self.config.foot_heading_weight) * (foot_forward - self.target_axes[0])
-            )
+            residuals.append(np.sqrt(self.config.foot_heading_weight) * (foot_forward - self.target_axes[0]))
 
         for hand_link, local_axis, target_axis_index, target_sign, _name in HAND_ORIENTATION_TARGETS:
             hand_axis = self._frame_rotation(hand_link) @ local_axis
@@ -785,10 +771,7 @@ def evaluate_head_candidate(
     status = "accepted" if accepted else "rejected"
     return (
         accepted,
-        (
-            f"{status}: axis_error_deg={head_axis_error_deg:.2f}, "
-            f"offset_angle_deg={offset_angle_deg:.1f}"
-        ),
+        (f"{status}: axis_error_deg={head_axis_error_deg:.2f}, offset_angle_deg={offset_angle_deg:.1f}"),
     )
 
 
@@ -830,10 +813,24 @@ def solve_xsens_tpose_calibration(
 def solve_xsens_tpose_calibration_from_data(
     tpose: XsensHdf5Tpose,
     config: XsensTposeCalibrationConfig | None = None,
+    *,
+    position_scale_factor: float | None = None,
 ) -> XsensTposeCalibrationResult:
-    """Solve the dedicated G1 calibration IK from already loaded Xsens T-pose data."""
+    """Solve calibration IK from an Xsens T-pose-like positional reference.
+
+    When ``position_scale_factor`` is omitted, positions follow the legacy
+    direct-human path and are scaled by the configured human/robot height
+    ratio. G1-proportioned callers pass ``1.0`` because their positions already
+    encode the robot morphology. Segment orientations are never rescaled.
+    """
+
     config = config or XsensTposeCalibrationConfig()
-    scale_factor = RobotConfig(robot_type=config.robot_type).ROBOT_HEIGHT / config.default_human_height
+    scale_factor = position_scale_factor
+    if scale_factor is None:
+        scale_factor = RobotConfig(robot_type=config.robot_type).ROBOT_HEIGHT / config.default_human_height
+    if not np.isfinite(scale_factor) or scale_factor <= 0.0:
+        raise ValueError("position_scale_factor must be finite and positive")
+    scale_factor = float(scale_factor)
     target_positions, target_axes = align_and_scale_tpose_targets(tpose.positions_m, scale_factor=scale_factor)
     model = mujoco.MjModel.from_xml_path(str(_robot_urdf_for_config(config)).replace(".urdf", ".xml"))
     problem = _G1CalibrationProblem(

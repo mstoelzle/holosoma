@@ -7,10 +7,14 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from holosoma_retargeting.config_types.retargeter import RetargeterConfig
+from holosoma_retargeting.config_types.retargeter import OrientationTrackingConfig, RetargeterConfig
 from holosoma_retargeting.config_types.retargeting import XsensMorphologyConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
-from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Motion
+from holosoma_retargeting.data_utils.xsens_hdf5 import (
+    XSENS_BODY_SEGMENT_NAMES,
+    XsensHdf5Motion,
+    XsensHdf5Tpose,
+)
 from holosoma_retargeting.examples import robot_retarget
 from holosoma_retargeting.kinematics import KinematicMotion
 from holosoma_retargeting.xsens.orientation_tracking import XsensOrientationTargets
@@ -168,6 +172,99 @@ def test_g1_mode_uses_robot_xml_and_disables_uniform_rescaling(monkeypatch) -> N
     assert scale == 1.0
     assert captured["g1_model_path"] == Path("models/g1/custom.xml")
     assert captured["grounding"] == "match_lowest_soles"
+
+
+def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(monkeypatch) -> None:
+    motion = _motion()
+    body_count = len(XSENS_BODY_SEGMENT_NAMES)
+    adapted_tpose = XsensHdf5Tpose(
+        positions_m=np.arange(body_count * 3, dtype=float).reshape(body_count, 3),
+        quaternions_wijk=motion.quaternions_wijk[0].copy(),
+        variant="G1ProportionedTpose",
+        segment_names=list(XSENS_BODY_SEGMENT_NAMES),
+        source_indices=list(range(body_count)),
+    )
+    sentinel_calibration = object()
+    sentinel_targets = object()
+    captured: dict[str, object] = {}
+
+    def fake_adapt_tpose(**kwargs):
+        captured["adapt"] = kwargs
+        return adapted_tpose
+
+    def fake_solve(tpose, config, *, position_scale_factor):
+        captured["solve_tpose"] = tpose
+        captured["solve_config"] = config
+        captured["position_scale_factor"] = position_scale_factor
+        return sentinel_calibration
+
+    def fake_build(calibration, **kwargs):
+        captured["build_calibration"] = calibration
+        captured["build"] = kwargs
+        return sentinel_targets
+
+    monkeypatch.setattr(robot_retarget, "adapt_xsens_tpose_to_g1", fake_adapt_tpose)
+    monkeypatch.setattr(robot_retarget, "solve_xsens_tpose_calibration_from_data", fake_solve)
+    monkeypatch.setattr(robot_retarget, "build_xsens_orientation_targets_from_calibration", fake_build)
+
+    result = robot_retarget.load_orientation_targets_for_retargeting(
+        orientation_config=OrientationTrackingConfig(enable=True),
+        robot_config=RobotConfig(robot_type="g1", robot_urdf_file="models/g1/custom.urdf"),
+        robot="g1",
+        data_format="xsens",
+        task_type="robot_only",
+        xsens_motion=motion,
+        hdf5_path=Path("recording.hdf5"),
+        morphology_config=XsensMorphologyConfig(),
+    )
+
+    assert result is sentinel_targets
+    assert captured["adapt"] == {
+        "hdf5_path": Path("recording.hdf5"),
+        "g1_model_path": Path("models/g1/custom.xml"),
+        "grounding": "match_lowest_soles",
+        "preserve_joint_offsets": False,
+    }
+    assert captured["solve_tpose"] is adapted_tpose
+    assert captured["position_scale_factor"] == 1.0
+    assert captured["build_calibration"] is sentinel_calibration
+
+
+def test_direct_mode_retains_human_scaled_orientation_calibration(monkeypatch) -> None:
+    motion = _motion()
+    sentinel_calibration = object()
+    sentinel_targets = object()
+    captured: dict[str, object] = {}
+
+    def fake_solve(hdf5_path, *, config):
+        captured["hdf5_path"] = hdf5_path
+        captured["config"] = config
+        return sentinel_calibration
+
+    def fail_adapt(**_kwargs):
+        raise AssertionError("Direct mode must not morphology-adapt the calibration T-pose")
+
+    monkeypatch.setattr(robot_retarget, "solve_xsens_tpose_calibration", fake_solve)
+    monkeypatch.setattr(robot_retarget, "adapt_xsens_tpose_to_g1", fail_adapt)
+    monkeypatch.setattr(
+        robot_retarget,
+        "build_xsens_orientation_targets_from_calibration",
+        lambda _calibration, **_kwargs: sentinel_targets,
+    )
+
+    result = robot_retarget.load_orientation_targets_for_retargeting(
+        orientation_config=OrientationTrackingConfig(enable=True),
+        robot_config=RobotConfig(robot_type="g1"),
+        robot="g1",
+        data_format="xsens",
+        task_type="robot_only",
+        xsens_motion=motion,
+        hdf5_path=Path("recording.hdf5"),
+        morphology_config=XsensMorphologyConfig(mode="direct"),
+    )
+
+    assert result is sentinel_targets
+    assert captured["hdf5_path"] == Path("recording.hdf5")
 
 
 def test_g1_mode_rejects_unsupported_task_or_robot() -> None:

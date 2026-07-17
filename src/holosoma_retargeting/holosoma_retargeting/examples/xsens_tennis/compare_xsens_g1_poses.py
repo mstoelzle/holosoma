@@ -31,7 +31,10 @@ src_root = Path(__file__).resolve().parents[3]
 if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
-from holosoma_retargeting.data_utils.xsens_hdf5 import load_xsens_hdf5_tpose  # noqa: E402
+from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
+    XsensHdf5Tpose,
+    load_xsens_hdf5_tpose,
+)
 from holosoma_retargeting.kinematics import KinematicPose, KinematicTree, Transform  # noqa: E402
 from holosoma_retargeting.src.mujoco_utils import (  # noqa: E402
     MujocoFramePoseSet,
@@ -272,14 +275,10 @@ def body_poses_from_xsens_pose(
     """Map one ordered Xsens pose onto a validated Xsens kinematic tree."""
 
     if preserve_unmapped_bodies:
-        source_indices = {
-            normalize_xsens_name(name): index for index, name in enumerate(pose.body_names)
-        }
+        source_indices = {normalize_xsens_name(name): index for index, name in enumerate(pose.body_names)}
         result: dict[str, Transform] = {}
         for body in model.bodies:
-            source_name = normalize_xsens_name(
-                str(body.metadata.get("xsens:sourceSegmentName", body.name))
-            )
+            source_name = normalize_xsens_name(str(body.metadata.get("xsens:sourceSegmentName", body.name)))
             if source_name not in source_indices:
                 result[body.name] = body.reference_pose
                 continue
@@ -376,8 +375,15 @@ def prepare_comparison_assets(config: XsensG1PoseComparisonConfig) -> Comparison
         verbose=0,
     )
     calibration = solve_xsens_tpose_calibration_from_data(
-        tpose,
+        XsensHdf5Tpose(
+            positions_m=g1_xsens_tpose.positions_m,
+            quaternions_wijk=tpose.quaternions_wijk,
+            variant="G1ProportionedTpose",
+            segment_names=list(tpose.segment_names),
+            source_indices=list(tpose.source_indices),
+        ),
         config=calibration_config,
+        position_scale_factor=1.0,
     )
     g1_model_path = _resolve_g1_xml(g1_urdf_path)
     g1_tpose_qpos = np.asarray(calibration.qpos[0], dtype=float)

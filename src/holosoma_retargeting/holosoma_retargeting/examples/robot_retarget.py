@@ -56,7 +56,10 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
     transform_from_human_to_world,
     transform_y_up_to_z_up,
 )
-from holosoma_retargeting.xsens.morphology_adaptation import adapt_xsens_motion_to_g1  # noqa: E402
+from holosoma_retargeting.xsens.morphology_adaptation import (  # noqa: E402
+    adapt_xsens_motion_to_g1,
+    adapt_xsens_tpose_to_g1,
+)
 from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
     XsensOrientationTargets,
     build_xsens_orientation_targets_from_calibration,
@@ -66,6 +69,7 @@ from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
 from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
     XsensTposeCalibrationConfig,
     solve_xsens_tpose_calibration,
+    solve_xsens_tpose_calibration_from_data,
 )
 
 # Configure logging
@@ -195,9 +199,19 @@ def validate_xsens_morphology_selection(
         return
     if task_type != "robot_only" or robot != "g1":
         raise ValueError(
-            "G1-proportioned Xsens morphology requires task_type='robot_only', "
-            "data_format='xsens', and robot='g1'"
+            "G1-proportioned Xsens morphology requires task_type='robot_only', data_format='xsens', and robot='g1'"
         )
+
+
+def resolve_xsens_g1_model_path(
+    robot_config: RobotConfig,
+    morphology_config: XsensMorphologyConfig,
+) -> Path:
+    """Return the MuJoCo model used by all G1 morphology preparation paths."""
+
+    if morphology_config.g1_model_path is not None:
+        return morphology_config.g1_model_path
+    return Path(robot_config.ROBOT_URDF_FILE).with_suffix(".xml")
 
 
 def prepare_xsens_motion_for_retargeting(
@@ -213,9 +227,7 @@ def prepare_xsens_motion_for_retargeting(
     if morphology_config.mode == "direct":
         return np.asarray(motion.positions_m, dtype=float).copy(), direct_scale
 
-    g1_model_path = morphology_config.g1_model_path
-    if g1_model_path is None:
-        g1_model_path = Path(robot_config.ROBOT_URDF_FILE).with_suffix(".xml")
+    g1_model_path = resolve_xsens_g1_model_path(robot_config, morphology_config)
     adapted = adapt_xsens_motion_to_g1(
         motion,
         hdf5_path=hdf5_path,
@@ -586,6 +598,7 @@ def load_orientation_targets_for_retargeting(
     task_type: str,
     xsens_motion: XsensHdf5Motion | None,
     hdf5_path: Path | None,
+    morphology_config: XsensMorphologyConfig,
 ) -> XsensOrientationTargets | None:
     """Load optional Xsens orientation/axis targets for retargeting."""
     if not orientation_config.enable:
@@ -603,15 +616,38 @@ def load_orientation_targets_for_retargeting(
     if hdf5_path is None:
         raise ValueError("The source Xsens HDF5 path is required for automatic orientation calibration")
 
-    logger.info("Calibrating Xsens-to-G1 segment-frame orientation offsets from the recording T-pose")
-    calibration = solve_xsens_tpose_calibration(
-        hdf5_path,
-        config=XsensTposeCalibrationConfig(
-            robot_type=robot,
-            robot_urdf_file=robot_config.ROBOT_URDF_FILE,
-            verbose=0,
-        ),
+    calibration_config = XsensTposeCalibrationConfig(
+        robot_type=robot,
+        robot_urdf_file=robot_config.ROBOT_URDF_FILE,
+        verbose=0,
     )
+    if morphology_config.mode == "g1_proportioned":
+        g1_model_path = resolve_xsens_g1_model_path(robot_config, morphology_config)
+        logger.info(
+            "Calibrating Xsens-to-G1 segment-frame orientation offsets from the G1-proportioned "
+            "recording T-pose (position scale=1.0, grounding=%s, preserve_joint_offsets=%s)",
+            morphology_config.grounding,
+            morphology_config.preserve_joint_offsets,
+        )
+        calibration_tpose = adapt_xsens_tpose_to_g1(
+            hdf5_path=hdf5_path,
+            g1_model_path=g1_model_path,
+            grounding=morphology_config.grounding,
+            preserve_joint_offsets=morphology_config.preserve_joint_offsets,
+        )
+        calibration = solve_xsens_tpose_calibration_from_data(
+            calibration_tpose,
+            config=calibration_config,
+            position_scale_factor=1.0,
+        )
+    else:
+        logger.info(
+            "Calibrating Xsens-to-G1 segment-frame orientation offsets from the direct human-sized recording T-pose"
+        )
+        calibration = solve_xsens_tpose_calibration(
+            hdf5_path,
+            config=calibration_config,
+        )
     return build_xsens_orientation_targets_from_calibration(
         calibration,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
@@ -651,9 +687,7 @@ def describe_retargeting_setup(
 ) -> tuple[str, ...]:
     """Describe the active optimizer objectives, constraints, and rotation mappings."""
 
-    positional_pairs = ", ".join(
-        f"{source}->{target}" for source, target in retargeter.laplacian_match_links.items()
-    )
+    positional_pairs = ", ".join(f"{source}->{target}" for source, target in retargeter.laplacian_match_links.items())
     regularized_dofs = int(np.count_nonzero(np.asarray(retargeter.Q_diag, dtype=float)))
     nominal_active = (
         q_nominal_list is not None
@@ -679,10 +713,10 @@ def describe_retargeting_setup(
             f"    [{'active' if regularized_dofs else 'inactive'}] joint regularization "
             f"(weighted DoFs={regularized_dofs})"
         ),
-            (
-                f"    [{'active' if nominal_active else 'inactive'}] nominal-pose tracking "
-                f"(weight={retargeter.w_nominal_tracking_init}, nominal trajectory={nominal_status})"
-            ),
+        (
+            f"    [{'active' if nominal_active else 'inactive'}] nominal-pose tracking "
+            f"(weight={retargeter.w_nominal_tracking_init}, nominal trajectory={nominal_status})"
+        ),
     ]
 
     if orientation_targets is None:
@@ -703,8 +737,7 @@ def describe_retargeting_setup(
                 (
                     "    [active] segment-axis direction tracking "
                     f"(weight={retargeter.orientation_config.axis_weight}, "
-                    f"axes={len(orientation_targets.axis_names)}): "
-                    + ", ".join(orientation_targets.axis_names)
+                    f"axes={len(orientation_targets.axis_names)}): " + ", ".join(orientation_targets.axis_names)
                 ),
             ]
         )
@@ -946,6 +979,7 @@ def main(cfg: RetargetingConfig) -> None:
         task_type=task_type,
         xsens_motion=xsens_motion,
         hdf5_path=hdf5_path,
+        morphology_config=cfg.xsens_morphology,
     )
     if (
         orientation_targets is not None

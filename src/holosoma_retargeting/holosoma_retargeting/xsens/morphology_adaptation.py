@@ -9,12 +9,15 @@ from typing import Literal
 
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XsensHdf5Motion,
+    XsensHdf5Tpose,
     load_xsens_hdf5_calibration,
+    load_xsens_hdf5_tpose,
 )
 from holosoma_retargeting.kinematics import (
     GroundingSurface,
     KinematicMorphologyAdapter,
     KinematicMotion,
+    KinematicPose,
     KinematicTree,
     LowestSurfaceGrounding,
     with_body_attachments,
@@ -206,6 +209,45 @@ def adapt_xsens_motion_to_g1(
     )
 
 
+def adapt_xsens_tpose_to_g1(
+    *,
+    hdf5_path: str | Path,
+    g1_model_path: str | Path | None = None,
+    grounding: XsensGroundingMode = "match_lowest_soles",
+    preserve_joint_offsets: bool = False,
+    variant: str = "Tpose",
+) -> XsensHdf5Tpose:
+    """Reconstruct a recorded Xsens T-pose with G1-derived proportions.
+
+    Only positions are morphology-adapted. The recorded global segment
+    orientations remain byte-for-byte identical so the sensor-frame side of
+    orientation-offset calibration is unchanged.
+    """
+
+    tpose = load_xsens_hdf5_tpose(hdf5_path, variant=variant)
+    prepared = prepare_g1_xsens_morphology(
+        tpose.segment_names,
+        hdf5_path=hdf5_path,
+        g1_model_path=g1_model_path,
+        grounding=grounding,
+        preserve_joint_offsets=preserve_joint_offsets,
+    )
+    adapted = prepared.adapter.adapt_pose(
+        KinematicPose(
+            tuple(tpose.segment_names),
+            tpose.positions_m,
+            tpose.quaternions_wijk,
+        )
+    )
+    return XsensHdf5Tpose(
+        positions_m=adapted.positions_m,
+        quaternions_wijk=adapted.orientations_wxyz,
+        variant=f"G1Proportioned{variant}",
+        segment_names=list(tpose.segment_names),
+        source_indices=list(tpose.source_indices),
+    )
+
+
 def xsens_body_to_source_mapping(
     model: KinematicTree,
     source_segment_names: Sequence[str],
@@ -219,6 +261,7 @@ __all__ = [
     "PreparedG1XsensMorphology",
     "XsensGroundingMode",
     "adapt_xsens_motion_to_g1",
+    "adapt_xsens_tpose_to_g1",
     "build_subject_xsens_reference_model",
     "build_xsens_morphology_adapter",
     "prepare_g1_xsens_morphology",

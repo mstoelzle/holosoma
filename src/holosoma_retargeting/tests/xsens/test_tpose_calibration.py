@@ -6,6 +6,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import pytest
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.task import TaskConfig
@@ -80,8 +81,7 @@ def test_align_and_scale_tpose_targets_ground_aligns_and_centers() -> None:
 
     np.testing.assert_allclose(aligned[XSENS_BODY_SEGMENT_NAMES.index("Pelvis"), :2], [0.0, 0.0])
     foot_indices = [
-        XSENS_BODY_SEGMENT_NAMES.index(name)
-        for name in ("Left Foot", "Right Foot", "Left Toe", "Right Toe")
+        XSENS_BODY_SEGMENT_NAMES.index(name) for name in ("Left Foot", "Right Foot", "Left Toe", "Right Toe")
     ]
     assert np.min(aligned[foot_indices, 2]) == 0.0
     np.testing.assert_allclose(np.cross(axes[0], axes[1]), axes[2], atol=1e-8)
@@ -282,7 +282,6 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     right_hand = data.xpos[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_rubber_hand_link")]
     np.testing.assert_allclose(left_hand[[0, 2]], right_hand[[0, 2]], atol=0.2)
     np.testing.assert_allclose(left_hand[1], -right_hand[1], atol=0.2)
-
     left_knee = result.qpos[0, 10]
     right_knee = result.qpos[0, 16]
     assert abs(left_knee) < 0.5
@@ -293,9 +292,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     neutral_data.qpos[3] = 1.0
     mujoco.mj_forward(model, neutral_data)
     neutral_hip_positions = [
-        neutral_data.xanchor[
-            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_hip_pitch_joint")
-        ]
+        neutral_data.xanchor[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_hip_pitch_joint")]
         for side in ("left", "right")
     ]
     nominal_half_hip_width = 0.5 * np.linalg.norm(neutral_hip_positions[0] - neutral_hip_positions[1])
@@ -339,9 +336,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
         hip_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_hip_pitch_joint")
         knee_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_knee_joint")
         ankle_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_ankle_pitch_joint")
-        ankle_roll_joint_id = mujoco.mj_name2id(
-            model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_ankle_roll_joint"
-        )
+        ankle_roll_joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{side}_ankle_roll_joint")
         hip_position = data.xanchor[hip_joint_id]
         knee_position = data.xanchor[knee_joint_id]
         ankle_position = data.xanchor[ankle_joint_id]
@@ -363,3 +358,48 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
     assert axis_alignment_error_deg(torso_rotation[:, 0], forward) < 1.0
     torso_up = torso_rotation[:, 2]
     assert axis_alignment_error_deg(torso_up, up) < 1.0
+
+
+def test_g1_proportioned_tpose_calibration_uses_explicit_unit_scale() -> None:
+    positions = _symmetric_tpose_positions()
+    quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (len(XSENS_BODY_SEGMENT_NAMES), 1))
+    tpose = XsensHdf5Tpose(
+        positions_m=positions,
+        quaternions_wijk=quaternions,
+        variant="G1ProportionedTpose",
+        segment_names=XSENS_BODY_SEGMENT_NAMES,
+        source_indices=list(range(len(XSENS_BODY_SEGMENT_NAMES))),
+    )
+
+    result = solve_xsens_tpose_calibration_from_data(
+        tpose,
+        config=XsensTposeCalibrationConfig(max_nfev=1, verbose=0),
+        position_scale_factor=1.0,
+    )
+    expected_positions, _ = align_and_scale_tpose_targets(positions, scale_factor=1.0)
+
+    assert result.scale_factor == 1.0
+    assert result.variant == "G1ProportionedTpose"
+    np.testing.assert_allclose(result.xsens_tpose_positions_m, expected_positions)
+
+
+@pytest.mark.parametrize("scale_factor", [0.0, -1.0, np.inf, np.nan])
+def test_tpose_calibration_rejects_invalid_explicit_position_scale(scale_factor: float) -> None:
+    positions = _symmetric_tpose_positions()
+    tpose = XsensHdf5Tpose(
+        positions_m=positions,
+        quaternions_wijk=np.tile(
+            np.array([1.0, 0.0, 0.0, 0.0]),
+            (len(XSENS_BODY_SEGMENT_NAMES), 1),
+        ),
+        variant="Tpose",
+        segment_names=XSENS_BODY_SEGMENT_NAMES,
+        source_indices=list(range(len(XSENS_BODY_SEGMENT_NAMES))),
+    )
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        solve_xsens_tpose_calibration_from_data(
+            tpose,
+            config=XsensTposeCalibrationConfig(max_nfev=1, verbose=0),
+            position_scale_factor=scale_factor,
+        )

@@ -215,6 +215,7 @@ def process_single_task(args):
         task_type=task_type,
         xsens_motion=xsens_motion,
         hdf5_path=Path(file_path) if xsens_motion is not None else None,
+        morphology_config=xsens_morphology,
     )
     if (
         orientation_targets is not None
