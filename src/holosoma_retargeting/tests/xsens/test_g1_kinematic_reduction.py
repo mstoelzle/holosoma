@@ -8,12 +8,14 @@ import json
 import mujoco
 import numpy as np
 import pytest
+from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES, XsensHdf5Motion
 from holosoma_retargeting.kinematics import (
     KinematicPose,
     compute_reference_joint_positions,
     validate_kinematic_tree,
 )
 from holosoma_retargeting.kinematics.model import rotate_vector
+from holosoma_retargeting.xsens import morphology_adaptation
 from holosoma_retargeting.xsens.avatar_mesh import build_xsens_avatar_meshes
 from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     G1Anthropometry,
@@ -23,7 +25,10 @@ from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     extract_g1_anthropometry,
     g1_anthropometry_to_xsens_avatar_proportions,
 )
-from holosoma_retargeting.xsens.morphology_adaptation import build_xsens_morphology_adapter
+from holosoma_retargeting.xsens.morphology_adaptation import (
+    adapt_xsens_motion_to_g1,
+    build_xsens_morphology_adapter,
+)
 
 
 @pytest.fixture(scope="module")
@@ -63,6 +68,62 @@ def test_anthropometry_extraction_has_no_pose_input_or_state_evaluation(monkeypa
     assert result.lengths_m["upper_arm"] > 0.0
     assert result.lengths_m["forearm"] > 0.0
     assert not np.isclose(result.lengths_m["upper_arm"], result.lengths_m["forearm"])
+
+
+def test_body_only_tree_matches_optimizer_xsens_contract(anthropometry: G1Anthropometry) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(include_tennis_racket=False),
+    )
+
+    assert len(model.bodies) == len(XSENS_BODY_SEGMENT_NAMES) == 23
+    assert len(model.joints) == 22
+    assert "TennisRacket" not in model.body_map()
+    source_names = tuple(str(body.metadata["xsens:sourceSegmentName"]) for body in model.bodies)
+
+    def normalized(name: str) -> str:
+        return "".join(name.lower().split())
+
+    assert tuple(map(normalized, source_names)) == tuple(map(normalized, XSENS_BODY_SEGMENT_NAMES))
+
+
+def test_full_motion_adaptation_preserves_pose_data_and_g1_anchors(
+    anthropometry: G1Anthropometry,
+    monkeypatch,
+) -> None:
+    target = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(include_tennis_racket=False),
+    )
+    monkeypatch.setattr(
+        morphology_adaptation,
+        "build_subject_xsens_reference_model",
+        lambda *_args, **_kwargs: target,
+    )
+    reference_positions = np.stack([body.reference_pose.translation_m for body in target.bodies])
+    orientations = np.stack([body.reference_pose.rotation_wxyz for body in target.bodies])
+    translations = np.array([[1.0, 2.0, 0.3], [1.2, 2.1, 0.5]])
+    positions = reference_positions[None, :, :] + translations[:, None, :]
+    motion = XsensHdf5Motion(
+        positions_m=positions,
+        times_s=np.array([4.0, 4.1]),
+        stream_name="body_position_xyz_m",
+        segment_names=list(XSENS_BODY_SEGMENT_NAMES),
+        source_indices=list(range(len(XSENS_BODY_SEGMENT_NAMES))),
+        quaternions_wijk=np.repeat(orientations[None, :, :], 2, axis=0),
+        orientation_stream_name="body_orientation_quaternion_wijk",
+    )
+
+    adapted = adapt_xsens_motion_to_g1(motion, hdf5_path="unused.hdf5")
+
+    np.testing.assert_allclose(adapted.positions_m, positions, atol=5e-6)
+    np.testing.assert_array_equal(adapted.orientations_wxyz, motion.quaternions_wijk)
+    np.testing.assert_array_equal(adapted.times_s, motion.times_s)
+    pelvis_index = XSENS_BODY_SEGMENT_NAMES.index("Pelvis")
+    np.testing.assert_array_equal(
+        adapted.positions_m[:, pelvis_index, :2],
+        motion.positions_m[:, pelvis_index, :2],
+    )
 
 
 def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(

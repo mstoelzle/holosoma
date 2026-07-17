@@ -11,6 +11,8 @@ from .g1_kinematic_reduction import (
 )
 from .morphology_adaptation import (
     XsensGroundingMode,
+    adapt_xsens_motion_to_g1,
+    build_subject_xsens_reference_model,
     build_xsens_morphology_adapter,
     xsens_body_to_source_mapping,
 )
@@ -20,6 +22,8 @@ __all__ = [
     "G1XsensProportionReport",
     "G1XsensReductionConfig",
     "XsensGroundingMode",
+    "adapt_xsens_motion_to_g1",
+    "build_subject_xsens_reference_model",
     "build_g1_proportioned_xsens_tree",
     "build_xsens_morphology_adapter",
     "export_g1_proportioned_xsens_usd",

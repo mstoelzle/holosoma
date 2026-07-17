@@ -64,6 +64,12 @@ The loader reads `xsens-segments/body_position_xyz_m` when available, otherwise 
 uses the Xsens stream timestamps to sample at 30 Hz, keeps `body_position_xyz_m` in its z-up convention, and converts
 legacy `position_cm` streams from y-up to the retargeting z-up frame.
 
+By default, the raw segment orientations and pelvis trajectory are first reconstructed on the in-memory
+G1-proportioned Xsens avatar. The adapter uses G1-derived limb dimensions and dynamically aligns the lowest subject
+and target outsole surfaces before the resulting 23 segment positions are passed to the existing G1 optimizer.
+Because these targets are already G1-sized, the normal preprocessing height alignment is retained but no additional
+uniform human-height scale is applied. This path does not require exporting or loading a USD model.
+
 ```bash
 # Single Xsens tennis sequence
 python examples/robot_retarget.py \
@@ -84,6 +90,21 @@ python examples/parallel_robot_retarget.py \
     --save_dir demo_results_parallel/g1/robot_only/xsens_tennis \
     --retargeter.foot-sticking-tolerance 0.02
 ```
+
+Use the legacy direct-human position targets for comparison or regression runs with:
+
+```bash
+python examples/robot_retarget.py \
+    --data_path demo_data/xsens_tennis \
+    --task-type robot_only \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_01 \
+    --data_format xsens \
+    --xsens-morphology.mode direct
+```
+
+The G1-proportioned mode defaults to collapsed compound-joint offsets and dynamic lowest-sole grounding. Override
+these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.grounding none`; use
+`--xsens-morphology.g1-model-path <model.xml>` to measure proportions from a non-default G1 MuJoCo model.
 
 The Xsens tennis files are local demo inputs; this code path works when `.hdf5`/`.h5` files are present in
 `demo_data/xsens_tennis`, but the retargeting code itself does not require those large files to be tracked by Git.

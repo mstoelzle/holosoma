@@ -3,15 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Literal
 
+from holosoma_retargeting.data_utils.xsens_hdf5 import (
+    XsensHdf5Motion,
+    load_xsens_hdf5_calibration,
+)
 from holosoma_retargeting.kinematics import (
     GroundingSurface,
     KinematicMorphologyAdapter,
+    KinematicMotion,
     KinematicTree,
     LowestSurfaceGrounding,
+    with_body_attachments,
 )
-from holosoma_retargeting.xsens.kinematic_model import normalize_xsens_name
+from holosoma_retargeting.xsens.g1_kinematic_reduction import (
+    G1XsensReductionConfig,
+    build_g1_proportioned_xsens_tree,
+    extract_g1_anthropometry,
+)
+from holosoma_retargeting.xsens.geometry_attachments import build_xsens_avatar_mesh_attachments
+from holosoma_retargeting.xsens.kinematic_model import build_xsens_kinematic_tree, normalize_xsens_name
 
 XsensGroundingMode = Literal["none", "match_lowest_soles"]
 _SOLE_SOURCE_BODY_NAMES = ("LeftFoot", "LeftToe", "RightFoot", "RightToe")
@@ -98,6 +111,66 @@ def build_xsens_morphology_adapter(
     )
 
 
+def build_subject_xsens_reference_model(
+    hdf5_path: str | Path,
+    *,
+    include_tennis_racket: bool = True,
+) -> KinematicTree:
+    """Build the calibrated subject model and visuals needed for grounding."""
+
+    calibration = load_xsens_hdf5_calibration(Path(hdf5_path).expanduser())
+    model = build_xsens_kinematic_tree(
+        calibration,
+        include_tennis_racket=include_tennis_racket,
+    )
+    body_names = {body.name for body in model.bodies}
+    meshes = {
+        name: attachments
+        for name, attachments in build_xsens_avatar_mesh_attachments(calibration).items()
+        if name in body_names
+    }
+    return with_body_attachments(model, meshes=meshes)
+
+
+def adapt_xsens_motion_to_g1(
+    motion: XsensHdf5Motion,
+    *,
+    hdf5_path: str | Path,
+    g1_model_path: str | Path | None = None,
+    grounding: XsensGroundingMode = "match_lowest_soles",
+    preserve_joint_offsets: bool = False,
+) -> KinematicMotion:
+    """Reconstruct one body-only Xsens motion using G1-derived proportions."""
+
+    source_names = tuple(motion.segment_names)
+    source_model = build_subject_xsens_reference_model(
+        hdf5_path,
+        include_tennis_racket=False,
+    )
+    target_model = build_g1_proportioned_xsens_tree(
+        extract_g1_anthropometry(g1_model_path),
+        G1XsensReductionConfig(
+            preserve_joint_offsets=preserve_joint_offsets,
+            include_visuals=True,
+            include_tennis_racket=False,
+        ),
+    )
+    adapter = build_xsens_morphology_adapter(
+        target_model,
+        source_names,
+        source_model=source_model if grounding == "match_lowest_soles" else None,
+        grounding=grounding,
+    )
+    return adapter.adapt_motion(
+        KinematicMotion(
+            source_names,
+            motion.positions_m,
+            motion.quaternions_wijk,
+            motion.times_s,
+        )
+    )
+
+
 def xsens_body_to_source_mapping(
     model: KinematicTree,
     source_segment_names: Sequence[str],
@@ -107,4 +180,10 @@ def xsens_body_to_source_mapping(
     return _body_to_source_mapping(model, tuple(source_segment_names), model_label="Model")
 
 
-__all__ = ["XsensGroundingMode", "build_xsens_morphology_adapter", "xsens_body_to_source_mapping"]
+__all__ = [
+    "XsensGroundingMode",
+    "adapt_xsens_motion_to_g1",
+    "build_subject_xsens_reference_model",
+    "build_xsens_morphology_adapter",
+    "xsens_body_to_source_mapping",
+]

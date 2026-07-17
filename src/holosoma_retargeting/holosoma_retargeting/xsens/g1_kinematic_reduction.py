@@ -49,6 +49,7 @@ class G1XsensReductionConfig:
 
     preserve_joint_offsets: bool = False
     include_visuals: bool = True
+    include_tennis_racket: bool = True
 
 
 @dataclass(frozen=True)
@@ -863,17 +864,19 @@ def build_g1_proportioned_xsens_tree(
 
     config = config or G1XsensReductionConfig()
     positions, joint_centers, applied_offsets = _build_reference_layout(anthropometry, config)
-    body_names = (
-        ("Pelvis",)
-        + tuple(spec.child_segment for spec in XSENS_JOINT_SPECS if not spec.source_joint.endswith("SwordOrigin"))
-        + (TENNIS_RACKET_BODY,)
+    joint_specs = tuple(
+        spec
+        for spec in XSENS_JOINT_SPECS
+        if config.include_tennis_racket or not spec.source_joint.endswith("SwordOrigin")
     )
-    positions[TENNIS_RACKET_BODY] = positions["RightHand"].copy()
-    joint_centers["RightHandSwordOrigin"] = positions[TENNIS_RACKET_BODY].copy()
+    body_names = ("Pelvis",) + tuple(canonical_xsens_segment_name(spec.child_segment) for spec in joint_specs)
+    if config.include_tennis_racket:
+        positions[TENNIS_RACKET_BODY] = positions["RightHand"].copy()
+        joint_centers["RightHandSwordOrigin"] = positions[TENNIS_RACKET_BODY].copy()
     visual_attachments = (
         _shared_visual_attachments(anthropometry, positions, joint_centers) if config.include_visuals else {}
     )
-    if config.include_visuals:
+    if config.include_visuals and config.include_tennis_racket:
         visual_attachments[TENNIS_RACKET_BODY] = tuple(
             _avatar_part_attachment(part) for part in build_tennis_racket_meshes()
         )
@@ -893,7 +896,6 @@ def build_g1_proportioned_xsens_tree(
             )
         )
 
-    joint_specs = XSENS_JOINT_SPECS
     joints = []
     for index, spec in enumerate(joint_specs):
         center = joint_centers[spec.source_joint]

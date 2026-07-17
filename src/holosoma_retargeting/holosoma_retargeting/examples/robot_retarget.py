@@ -24,19 +24,19 @@ if str(src_root) not in sys.path:
 
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
-from holosoma_retargeting.config_types.retargeting import RetargetingConfig  # noqa: E402
+from holosoma_retargeting.config_types.retargeting import (  # noqa: E402
+    RetargetingConfig,
+    XsensMorphologyConfig,
+)
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
 from holosoma_retargeting.config_types.task import TaskConfig  # noqa: E402
 from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
+    XsensHdf5Motion,
     load_xsens_hdf5_motion,
     resolve_xsens_hdf5_path,
 )
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
-)
-from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
-    XsensOrientationTargets,
-    load_xsens_orientation_targets,
 )
 from holosoma_retargeting.src.utils import (  # noqa: E402
     augment_object_poses,
@@ -52,6 +52,11 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
     preprocess_motion_data,
     transform_from_human_to_world,
     transform_y_up_to_z_up,
+)
+from holosoma_retargeting.xsens.morphology_adaptation import adapt_xsens_motion_to_g1  # noqa: E402
+from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
+    XsensOrientationTargets,
+    load_xsens_orientation_targets,
 )
 
 # Configure logging
@@ -168,6 +173,55 @@ def validate_config(cfg: RetargetingConfig) -> None:
     # robot_only accepts any format in the registry (already validated above)
 
 
+def validate_xsens_morphology_selection(
+    *,
+    task_type: str,
+    data_format: str,
+    robot: str,
+    config: XsensMorphologyConfig,
+) -> None:
+    """Fail early when G1 morphology adaptation is selected outside its contract."""
+
+    if data_format != "xsens" or config.mode == "direct":
+        return
+    if task_type != "robot_only" or robot != "g1":
+        raise ValueError(
+            "G1-proportioned Xsens morphology requires task_type='robot_only', "
+            "data_format='xsens', and robot='g1'"
+        )
+
+
+def prepare_xsens_motion_for_retargeting(
+    motion: XsensHdf5Motion,
+    *,
+    hdf5_path: Path,
+    direct_scale: float,
+    robot_config: RobotConfig,
+    morphology_config: XsensMorphologyConfig,
+) -> tuple[np.ndarray, float]:
+    """Return optimizer positions and the remaining uniform preprocessing scale."""
+
+    if morphology_config.mode == "direct":
+        return np.asarray(motion.positions_m, dtype=float).copy(), direct_scale
+
+    g1_model_path = morphology_config.g1_model_path
+    if g1_model_path is None:
+        g1_model_path = Path(robot_config.ROBOT_URDF_FILE).with_suffix(".xml")
+    adapted = adapt_xsens_motion_to_g1(
+        motion,
+        hdf5_path=hdf5_path,
+        g1_model_path=g1_model_path,
+        grounding=morphology_config.grounding,
+        preserve_joint_offsets=morphology_config.preserve_joint_offsets,
+    )
+    logger.info(
+        "Adapted Xsens motion to G1 proportions (grounding=%s, preserve_joint_offsets=%s)",
+        morphology_config.grounding,
+        morphology_config.preserve_joint_offsets,
+    )
+    return adapted.positions_m, 1.0
+
+
 def create_ground_points(x_range: tuple[float, float], y_range: tuple[float, float], size: int) -> np.ndarray:
     """Create ground point meshgrid.
 
@@ -192,7 +246,7 @@ def load_motion_data(
     task_name: str,
     constants: SimpleNamespace,
     motion_data_config: MotionDataConfig,
-) -> tuple[np.ndarray, np.ndarray, float]:
+) -> tuple[np.ndarray, np.ndarray, float, XsensHdf5Motion | None]:
     """Load motion data based on task type and format.
 
     Args:
@@ -204,7 +258,7 @@ def load_motion_data(
         motion_data_config: Motion data configuration
 
     Returns:
-        Tuple of (human_joints, object_poses, smpl_scale)
+        Tuple of (human_joints, object_poses, smpl_scale, xsens_motion)
         - human_joints: (T, J, 3) array of joint positions
         - object_poses: (T, 7) array of object poses [qw, qx, qy, qz, x, y, z]
         - smpl_scale: Scaling factor for SMPL compatibility
@@ -214,6 +268,7 @@ def load_motion_data(
     """
     logger.info("Loading motion data for task: %s, format: %s", task_name, data_format)
 
+    xsens_motion: XsensHdf5Motion | None = None
     if task_type == "robot_only":
         if data_format == "lafan":
             npy_path = data_path / f"{task_name}.npy"
@@ -307,7 +362,7 @@ def load_motion_data(
         human_joints.shape[0],
         smpl_scale,
     )
-    return human_joints, object_poses, smpl_scale
+    return human_joints, object_poses, smpl_scale, xsens_motion
 
 
 def setup_object_data(
@@ -515,6 +570,7 @@ def load_orientation_targets_for_retargeting(
     cfg: RetargetingConfig,
     data_format: str,
     task_type: str,
+    xsens_motion: XsensHdf5Motion | None,
 ) -> XsensOrientationTargets | None:
     """Load optional Xsens orientation/axis targets for retargeting."""
     orientation_cfg = cfg.retargeter.orientation
@@ -525,16 +581,8 @@ def load_orientation_targets_for_retargeting(
     if orientation_cfg.calibration_path is None:
         raise ValueError("--retargeter.orientation.calibration-path is required when orientation tracking is enabled")
 
-    target_fps = cfg.motion_data_config.target_fps if cfg.motion_data_config.target_fps is not None else None
-    if target_fps is None:
-        target_fps = RETARGETING_OUTPUT_FPS
-    hdf5_path = resolve_xsens_hdf5_path(cfg.data_path, cfg.task_name)
-    xsens_motion = load_xsens_hdf5_motion(
-        hdf5_path,
-        target_fps=target_fps,
-        frame_start=cfg.motion_data_config.frame_start,
-        max_frames=cfg.motion_data_config.max_frames,
-    )
+    if xsens_motion is None:
+        raise ValueError("Loaded Xsens motion is required for orientation-aware retargeting")
     return load_xsens_orientation_targets(
         calibration_path=orientation_cfg.calibration_path,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
@@ -674,6 +722,12 @@ def main(cfg: RetargetingConfig) -> None:
     data_format: str = cfg.data_format or DEFAULT_DATA_FORMATS[task_type]
     save_dir = cfg.save_dir if cfg.save_dir is not None else Path(DEFAULT_SAVE_DIRS[task_type].format(robot=robot))
     data_path = cfg.data_path
+    validate_xsens_morphology_selection(
+        task_type=task_type,
+        data_format=data_format,
+        robot=robot,
+        config=cfg.xsens_morphology,
+    )
 
     os.makedirs(save_dir, exist_ok=True)
     logger.info("Task: %s, Type: %s, Format: %s", task_name, task_type, data_format)
@@ -698,11 +752,28 @@ def main(cfg: RetargetingConfig) -> None:
     )
 
     # Load motion data
-    human_joints, object_poses, smpl_scale = load_motion_data(
+    human_joints, object_poses, smpl_scale, xsens_motion = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
-    orientation_targets = load_orientation_targets_for_retargeting(cfg=cfg, data_format=data_format, task_type=task_type)
-    if orientation_targets is not None and orientation_targets.orientation_target_rotations.shape[0] != human_joints.shape[0]:
+    if xsens_motion is not None:
+        hdf5_path = resolve_xsens_hdf5_path(data_path, task_name)
+        human_joints, smpl_scale = prepare_xsens_motion_for_retargeting(
+            xsens_motion,
+            hdf5_path=hdf5_path,
+            direct_scale=smpl_scale,
+            robot_config=cfg.robot_config,
+            morphology_config=cfg.xsens_morphology,
+        )
+    orientation_targets = load_orientation_targets_for_retargeting(
+        cfg=cfg,
+        data_format=data_format,
+        task_type=task_type,
+        xsens_motion=xsens_motion,
+    )
+    if (
+        orientation_targets is not None
+        and orientation_targets.orientation_target_rotations.shape[0] != human_joints.shape[0]
+    ):
         raise ValueError(
             "Orientation target frame count does not match loaded motion data: "
             f"{orientation_targets.orientation_target_rotations.shape[0]} vs {human_joints.shape[0]}"
@@ -731,7 +802,7 @@ def main(cfg: RetargetingConfig) -> None:
     if task_type == "robot_only":
         human_joints = preprocess_motion_data(human_joints, retargeter, toe_names, smpl_scale)
     elif task_type in {"object_interaction", "climbing"}:
-        human_joints, object_poses, object_moving_frame_idx = preprocess_motion_data(
+        human_joints, object_poses, _object_moving_frame_idx = preprocess_motion_data(
             human_joints,
             retargeter,
             toe_names,

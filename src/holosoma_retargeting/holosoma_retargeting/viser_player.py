@@ -39,7 +39,6 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
     XsensMotionSampler,
     XsensUsdActor,
-    build_subject_xsens_reference_model,
     load_xsens_usd_model,
     resolve_g1_xsens_usd,
     resolve_package_path,
@@ -48,7 +47,10 @@ from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
     validate_subject_xsens_usd,
 )
 from holosoma_retargeting.xsens.kinematic_model import TENNIS_RACKET_BODY  # noqa: E402
-from holosoma_retargeting.xsens.morphology_adaptation import build_xsens_morphology_adapter  # noqa: E402
+from holosoma_retargeting.xsens.morphology_adaptation import (  # noqa: E402
+    build_subject_xsens_reference_model,
+    build_xsens_morphology_adapter,
+)
 
 
 def load_npz(npz_path: str) -> tuple[np.ndarray, int]:
@@ -334,7 +336,9 @@ def make_player(
             g1_model = load_xsens_usd_model(g1_model_path)
             validate_g1_xsens_usd(g1_model)
             if subject_reference_model is None:
-                subject_reference_model = build_subject_xsens_reference_model(xsens_config.xsens_hdf5)
+                subject_reference_model = build_subject_xsens_reference_model(
+                    resolve_package_path(xsens_config.xsens_hdf5)
+                )
             xsens_actors["g1_xsens"] = XsensUsdActor(
                 server,
                 g1_model_path,

@@ -16,14 +16,12 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XsensHdf5Motion,
     load_xsens_hdf5_calibration,
 )
-from holosoma_retargeting.kinematics import KinematicTree, with_body_attachments
+from holosoma_retargeting.kinematics import KinematicTree
 from holosoma_retargeting.src.viser_utils import interpolation_window, quat_slerp
 from holosoma_retargeting.usd import open_usd_stage, read_kinematic_tree_from_stage
 from holosoma_retargeting.xsens.g1_kinematic_reduction import G1_XSENS_REDUCTION_VERSION
-from holosoma_retargeting.xsens.geometry_attachments import build_xsens_avatar_mesh_attachments
 from holosoma_retargeting.xsens.kinematic_model import (
     TENNIS_RACKET_BODY,
-    build_xsens_kinematic_tree,
     calibration_fingerprint,
     normalize_xsens_name,
 )
@@ -152,20 +150,6 @@ def validate_g1_xsens_usd(model: KinematicTree) -> None:
             f"(found version {generator_version or 'missing'}, expected {G1_XSENS_REDUCTION_VERSION}).\n"
             f"Regenerate it with:\n{command}"
         )
-
-
-def build_subject_xsens_reference_model(hdf5_path: str | Path) -> KinematicTree:
-    """Build the calibrated reference visuals needed for model-relative grounding."""
-
-    calibration = load_xsens_hdf5_calibration(resolve_package_path(hdf5_path))
-    model = build_xsens_kinematic_tree(calibration, include_tennis_racket=True)
-    body_names = {body.name for body in model.bodies}
-    meshes = {
-        name: attachments
-        for name, attachments in build_xsens_avatar_mesh_attachments(calibration).items()
-        if name in body_names
-    }
-    return with_body_attachments(model, meshes=meshes)
 
 
 @dataclass(frozen=True)
