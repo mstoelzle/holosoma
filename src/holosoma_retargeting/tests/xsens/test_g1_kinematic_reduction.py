@@ -71,6 +71,7 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
     model = build_g1_proportioned_xsens_tree(anthropometry)
     bodies = model.body_map()
     joints = model.joint_map()
+    reference_joints = compute_reference_joint_positions(model)
 
     assert len(model.bodies) == 24
     assert len(model.joints) == 23
@@ -83,15 +84,43 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
     }
     assert model.metadata["model:preserveJointOffsets"] is False
     assert validate_kinematic_tree(model).is_valid
-    np.testing.assert_allclose(joints["LeftShoulder"].child_frame.translation_m, np.zeros(3))
-    np.testing.assert_allclose(
-        np.linalg.norm(
-            bodies["LeftUpperArm"].reference_pose.translation_m - bodies["LeftShoulder"].reference_pose.translation_m
-        ),
-        np.linalg.norm(anthropometry.compound_offsets_m["left_shoulder"]),
+    shoulder_offsets: dict[str, np.ndarray] = {}
+    for side, title, sign in (("left", "Left", 1.0), ("right", "Right", -1.0)):
+        shoulder_offset = (
+            bodies[f"{title}UpperArm"].reference_pose.translation_m
+            - bodies[f"{title}Shoulder"].reference_pose.translation_m
+        )
+        wrist_offset = bodies[f"{title}Hand"].reference_pose.translation_m - reference_joints[f"{title}Wrist"]
+        shoulder_offsets[side] = shoulder_offset
+
+        np.testing.assert_allclose(
+            np.linalg.norm(shoulder_offset),
+            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]),
+            atol=1e-12,
+        )
+        assert sign * shoulder_offset[1] > 0.0
+        assert shoulder_offset[2] < -0.1
+        np.testing.assert_allclose(
+            np.linalg.norm(wrist_offset),
+            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_wrist"]),
+            atol=1e-12,
+        )
+        assert sign * wrist_offset[1] > 0.08
+        assert np.linalg.norm(wrist_offset[[0, 2]]) < 0.01
+        np.testing.assert_allclose(joints[f"{title}Wrist"].child_frame.translation_m, -wrist_offset)
+
+    upper_arm_span = np.linalg.norm(
+        bodies["LeftUpperArm"].reference_pose.translation_m - bodies["RightUpperArm"].reference_pose.translation_m
     )
+    expected_span = anthropometry.widths_m["shoulder"] + shoulder_offsets["left"][1] - shoulder_offsets["right"][1]
+    scalarized_span = anthropometry.widths_m["shoulder"] + sum(
+        np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]) for side in ("left", "right")
+    )
+    np.testing.assert_allclose(upper_arm_span, expected_span, atol=1e-12)
+    assert upper_arm_span < scalarized_span - 0.1
+
+    np.testing.assert_allclose(joints["LeftShoulder"].child_frame.translation_m, np.zeros(3))
     np.testing.assert_allclose(joints["LeftHip"].child_frame.translation_m, np.zeros(3))
-    np.testing.assert_allclose(joints["LeftWrist"].child_frame.translation_m, np.zeros(3))
     np.testing.assert_allclose(joints["LeftAnkle"].child_frame.translation_m, np.zeros(3))
     for name, value in _rigid_lengths(model).items():
         np.testing.assert_allclose(value, anthropometry.lengths_m[name], atol=1e-12)
@@ -130,19 +159,16 @@ def test_preserved_offsets_appear_once_without_changing_rigid_lengths(
     collapsed_forearm = collapsed_bodies["LeftForeArm"].meshes[0]
     preserved_forearm = preserved_bodies["LeftForeArm"].meshes[0]
     np.testing.assert_array_equal(collapsed_forearm.faces, preserved_forearm.faces)
-    np.testing.assert_allclose(
-        np.ptp(preserved_forearm.vertices_m, axis=0)[[0, 2]],
-        np.ptp(collapsed_forearm.vertices_m, axis=0)[[0, 2]],
-    )
-    assert np.ptp(preserved_forearm.vertices_m, axis=0)[1] > np.ptp(collapsed_forearm.vertices_m, axis=0)[1]
-    for title, sign in (("Left", 1.0), ("Right", -1.0)):
-        forearm = preserved_bodies[f"{title}ForeArm"]
-        hand = preserved_bodies[f"{title}Hand"]
-        vertices = np.vstack([mesh.vertices_m for mesh in forearm.meshes])
-        visual_edge_y = vertices[:, 1].max() if sign > 0.0 else vertices[:, 1].min()
-        hand_origin_y = hand.reference_pose.translation_m[1] - forearm.reference_pose.translation_m[1]
-        seam_width = sign * (hand_origin_y - visual_edge_y)
-        assert 0.0 <= seam_width < 0.01
+    np.testing.assert_allclose(preserved_forearm.vertices_m, collapsed_forearm.vertices_m)
+    for bodies in (collapsed_bodies, preserved_bodies):
+        for title, sign in (("Left", 1.0), ("Right", -1.0)):
+            forearm = bodies[f"{title}ForeArm"]
+            hand = bodies[f"{title}Hand"]
+            vertices = np.vstack([mesh.vertices_m for mesh in forearm.meshes])
+            visual_edge_y = vertices[:, 1].max() if sign > 0.0 else vertices[:, 1].min()
+            hand_origin_y = hand.reference_pose.translation_m[1] - forearm.reference_pose.translation_m[1]
+            seam_width = sign * (hand_origin_y - visual_edge_y)
+            assert 0.0 <= seam_width < 0.01
 
 
 def test_preserved_compound_edges_use_region_specific_canonical_frames(
@@ -157,10 +183,6 @@ def test_preserved_compound_edges_use_region_specific_canonical_frames(
     pelvis = bodies["Pelvis"].reference_pose.translation_m
 
     for side, title, sign in (("left", "Left", 1.0), ("right", "Right", -1.0)):
-        shoulder_path_length = sum(
-            np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
-        )
-        wrist_path_length = sum(np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_wrist"])
         shoulder_offset = (
             bodies[f"{title}UpperArm"].reference_pose.translation_m
             - bodies[f"{title}Shoulder"].reference_pose.translation_m
@@ -170,8 +192,20 @@ def test_preserved_compound_edges_use_region_specific_canonical_frames(
         hip_offset = bodies[f"{title}UpperLeg"].reference_pose.translation_m - hip_root
         ankle_offset = bodies[f"{title}Foot"].reference_pose.translation_m - joints[f"{title}Ankle"]
 
-        np.testing.assert_allclose(shoulder_offset, [0.0, sign * shoulder_path_length, 0.0], atol=1e-12)
-        np.testing.assert_allclose(wrist_offset, [0.0, sign * wrist_path_length, 0.0], atol=1e-12)
+        np.testing.assert_allclose(
+            np.linalg.norm(shoulder_offset),
+            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]),
+            atol=1e-12,
+        )
+        assert sign * shoulder_offset[1] > 0.0
+        assert shoulder_offset[2] < -0.1
+        np.testing.assert_allclose(
+            np.linalg.norm(wrist_offset),
+            np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_wrist"]),
+            atol=1e-12,
+        )
+        assert sign * wrist_offset[1] > 0.08
+        assert np.linalg.norm(wrist_offset[[0, 2]]) < 0.01
         np.testing.assert_allclose(hip_offset, anthropometry.compound_offsets_m[f"{side}_hip"], atol=1e-12)
         assert abs(float(ankle_offset[0])) < 1e-10
         assert abs(float(ankle_offset[1])) < 1e-5
@@ -318,7 +352,10 @@ def test_xsens_morphology_adapter_preserves_order_and_target_anchors(
     assert adapter.target_body_to_source_body["TennisRacket"] == "RightHandSword"
     source_positions = np.stack([body.reference_pose.translation_m for body in model.bodies])
     source_positions[1:] += np.array([10.0, -4.0, 2.0])
-    orientations = np.stack([body.reference_pose.rotation_wxyz for body in model.bodies])
+    angles = np.linspace(-0.4, 0.4, len(model.bodies))
+    orientations = np.column_stack(
+        [np.cos(0.5 * angles), np.sin(0.5 * angles), np.zeros_like(angles), np.zeros_like(angles)]
+    )
 
     adapted = adapter.adapt_pose(KinematicPose(source_names, source_positions, orientations))
 
@@ -381,5 +418,7 @@ def test_usd_export_round_trips_and_reports_both_raw_and_applied_offsets(tmp_pat
     assert payload["raw_offset_edge_frame"] == "parent_body_local"
     assert len(payload["raw_offset_edges_m"]["left_wrist"]) == 2
     assert np.linalg.norm(payload["root_anchors_m"]["left_hip"]) > 0.0
+    assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_shoulder"]) > 0.0
+    assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_wrist"]) > 0.0
     assert np.linalg.norm(payload["collapsed_adapter_offsets_m"]["left_hip"]) > 0.0
     assert all(np.linalg.norm(value) == 0.0 for value in payload["applied_offsets_m"].values())

@@ -35,7 +35,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "6"
+G1_XSENS_REDUCTION_VERSION = "7"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -449,24 +449,18 @@ def _align_vector(source: np.ndarray, target: np.ndarray) -> np.ndarray:
 def _canonical_offsets(anthropometry: G1Anthropometry, preserve: bool) -> dict[str, np.ndarray]:
     """Reduce fixed compound edges into the canonical Xsens reference frames.
 
-    Arm clusters are serialized along the T-pose arm axis. This retains every
-    fixed inter-axis translation once while avoiding a pose-dependent aggregate
-    shoulder/wrist vector. Hip and waist aggregates already live in canonical
-    root frames. The single ankle edge is expressed in the canonical shank
-    frame, rather than being incorrectly rotated with the thigh.
+    Shoulder and wrist clusters retain their net endpoint displacement rather
+    than their internal edge-path length. Hip and waist aggregates already live
+    in canonical root frames. The single ankle edge is expressed in the
+    canonical shank frame, rather than being incorrectly rotated with the
+    thigh.
     """
 
     result = {name: np.zeros(3, dtype=float) for name in anthropometry.compound_offsets_m}
     if not preserve:
         return result
-    for side, sign in (("left", 1.0), ("right", -1.0)):
-        arm_direction = np.array([0.0, sign, 0.0])
-        for cluster in ("shoulder", "wrist"):
-            path_length = sum(
-                np.linalg.norm(edge) for edge in anthropometry.compound_offset_edges_m[f"{side}_{cluster}"]
-            )
-            result[f"{side}_{cluster}"] = arm_direction * path_length
-
+    result.update(_canonical_upper_limb_offsets(anthropometry))
+    for side in ("left", "right"):
         result[f"{side}_hip"] = anthropometry.compound_offsets_m[f"{side}_hip"].copy()
         shank_rotation = _align_vector(
             anthropometry.span_vectors_m[f"{side}_shank"],
@@ -478,23 +472,37 @@ def _canonical_offsets(anthropometry: G1Anthropometry, preserve: bool) -> dict[s
     return result
 
 
+def _canonical_upper_limb_offsets(anthropometry: G1Anthropometry) -> dict[str, np.ndarray]:
+    """Return endpoint-equivalent shoulder and wrist offsets in Xsens frames."""
+
+    torso_rotation = _align_vector(anthropometry.span_vectors_m["torso"], np.array([0.0, 0.0, 1.0]))
+    result: dict[str, np.ndarray] = {}
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        arm_direction = np.array([0.0, sign, 0.0])
+        forearm_rotation = _align_vector(
+            anthropometry.span_vectors_m[f"{side}_forearm"],
+            arm_direction,
+        )
+        result[f"{side}_shoulder"] = torso_rotation @ anthropometry.compound_offsets_m[f"{side}_shoulder"]
+        result[f"{side}_wrist"] = forearm_rotation @ anthropometry.compound_offsets_m[f"{side}_wrist"]
+    return result
+
+
 def _collapsed_adapter_offsets(anthropometry: G1Anthropometry, preserve: bool) -> dict[str, np.ndarray]:
     """Keep cluster extent without retaining its separated-axis geometry.
 
-    The Xsens shoulder segment and pelvis-to-hip anchor are real adapter links in
-    the canonical topology.  In collapsed mode they carry the cluster's scalar
-    extent along the idealized limb axis.  The spherical joint itself remains
-    co-located with the downstream rigid segment, so the independently measured
-    upper-arm and thigh spans are unchanged.
+    Xsens shoulder and wrist segments carry the equivalent endpoint transform
+    of the collapsed G1 axis clusters. The pelvis-to-hip adapter retains its
+    scalar extent along the idealized leg axis. Spherical joints remain at the
+    downstream rigid-segment anchors, so independently measured rigid spans are
+    unchanged.
     """
 
     result = {name: np.zeros(3, dtype=float) for name in anthropometry.compound_offsets_m}
     if preserve:
         return result
-    for side, sign in (("left", 1.0), ("right", -1.0)):
-        result[f"{side}_shoulder"] = np.array(
-            [0.0, sign * np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_shoulder"]), 0.0]
-        )
+    result.update(_canonical_upper_limb_offsets(anthropometry))
+    for side in ("left", "right"):
         result[f"{side}_hip"] = np.array([0.0, 0.0, -np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_hip"])])
     return result
 
@@ -552,7 +560,7 @@ def _build_reference_layout(
         positions[f"{title}UpperArm"] = shoulder_root + offsets[f"{side}_shoulder"] + adapters[f"{side}_shoulder"]
         positions[f"{title}ForeArm"] = positions[f"{title}UpperArm"] + arm_direction * lengths["upper_arm"]
         wrist_center = positions[f"{title}ForeArm"] + arm_direction * lengths["forearm"]
-        positions[f"{title}Hand"] = wrist_center + offsets[f"{side}_wrist"]
+        positions[f"{title}Hand"] = wrist_center + offsets[f"{side}_wrist"] + adapters[f"{side}_wrist"]
 
         hip_root = np.asarray(anthropometry.root_anchors_m[f"{side}_hip"], dtype=float)
         hip_center = hip_root + offsets[f"{side}_hip"] + adapters[f"{side}_hip"]
@@ -727,10 +735,10 @@ def _shared_visual_attachments(
     positions: Mapping[str, np.ndarray],
     joint_centers: Mapping[str, np.ndarray],
 ) -> dict[str, tuple[MeshAttachment, ...]]:
-    # A preserved wrist adapter lies after the rigid forearm span. The Xsens
-    # visual factory has no separate adapter segment, so extend the existing
-    # forearm visual to the hand origin. Joint anchors remain untouched; this
-    # is strictly a longitudinal extent adjustment of the shared visual parts.
+    # A wrist adapter lies after the rigid forearm span. The Xsens visual
+    # factory has no separate adapter segment, so extend the existing forearm
+    # visual to the hand origin. Joint anchors remain untouched; this is
+    # strictly a longitudinal extent adjustment of the shared visual parts.
     visual_joint_centers = dict(joint_centers)
     for side in ("Left", "Right"):
         if np.linalg.norm(positions[f"{side}Hand"] - joint_centers[f"{side}Wrist"]) > 1e-12:
