@@ -188,6 +188,77 @@ class GroundPlaneBounds:
     height: float
 
 
+@dataclass(frozen=True)
+class InitialCameraView:
+    """World-space camera pose selected from the displayed floating bases."""
+
+    position: np.ndarray
+    look_at: np.ndarray
+
+
+def compute_initial_camera_view(
+    base_positions_m: Sequence[np.ndarray],
+    base_orientations_wxyz: Sequence[np.ndarray],
+    *,
+    minimum_distance_m: float = 3.0,
+) -> InitialCameraView:
+    """Frame all floating bases from the direction that they face.
+
+    The local +x axis is treated as forward. When several actors are shown, the
+    view targets their centroid, uses their mean heading, and moves farther away
+    as their floating bases become more widely separated.
+    """
+
+    positions = np.asarray(base_positions_m, dtype=float)
+    orientations = np.asarray(base_orientations_wxyz, dtype=float)
+    if positions.ndim != 2 or positions.shape[1:] != (3,) or positions.shape[0] == 0:
+        raise ValueError("base_positions_m must contain at least one xyz position")
+    if orientations.shape != (positions.shape[0], 4):
+        raise ValueError("base_orientations_wxyz must contain one wxyz quaternion per position")
+    if not np.isfinite(positions).all() or not np.isfinite(orientations).all():
+        raise ValueError("Floating-base poses must contain only finite values")
+    if minimum_distance_m <= 0.0:
+        raise ValueError("minimum_distance_m must be positive")
+
+    quaternion_norms = np.linalg.norm(orientations, axis=1)
+    if np.any(quaternion_norms <= 1e-12):
+        raise ValueError("Floating-base quaternions must have non-zero norm")
+    quaternions = orientations / quaternion_norms[:, None]
+
+    # First column of each quaternion rotation matrix: local +x in world space.
+    w, x, y, z = quaternions.T
+    forwards_xy = np.column_stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + w * z),
+        )
+    )
+    horizontal_norms = np.linalg.norm(forwards_xy, axis=1)
+    usable = horizontal_norms > 1e-8
+    if np.any(usable):
+        headings = forwards_xy[usable] / horizontal_norms[usable, None]
+        view_direction_xy = headings.mean(axis=0)
+        if np.linalg.norm(view_direction_xy) <= 1e-8:
+            # Opposing headings have no unique mean; keep the first actor's view.
+            view_direction_xy = headings[0]
+        else:
+            view_direction_xy /= np.linalg.norm(view_direction_xy)
+    else:
+        view_direction_xy = np.array([1.0, 0.0])
+
+    look_at = positions.mean(axis=0)
+    horizontal_radius = float(np.max(np.linalg.norm(positions[:, :2] - look_at[:2], axis=1)))
+    distance = max(float(minimum_distance_m), 2.0 * horizontal_radius + 2.0)
+    position = look_at + np.array(
+        [
+            distance * view_direction_xy[0],
+            distance * view_direction_xy[1],
+            max(1.0, 0.35 * distance),
+        ]
+    )
+    return InitialCameraView(position=position, look_at=look_at)
+
+
 def compute_ground_plane_bounds(
     *,
     qpos: np.ndarray | None = None,
@@ -389,6 +460,49 @@ def make_player(
         print(f"[viser_player] {mode} root offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}) m")
     if "g1_xsens" in xsens_actors:
         print("[viser_player] g1_xsens grounding=dynamic lowest-sole matching")
+
+    initial_base_positions: list[np.ndarray] = []
+    initial_base_orientations: list[np.ndarray] = []
+    if show_robot:
+        assert qpos is not None
+        initial_base_positions.append(np.asarray(qpos[0, 0:3], dtype=float))
+        initial_base_orientations.append(np.asarray(qpos[0, 3:7], dtype=float))
+    if xsens_actors:
+        assert xsens_sampler is not None
+        initial_xsens_pose = xsens_sampler.sample(float(xsens_sampler.times_s[0]))
+        initial_g1_positions = None
+        if "g1_xsens" in xsens_actors:
+            assert g1_xsens_adapter is not None
+            initial_g1_positions = g1_xsens_adapter.adapt_pose(
+                KinematicPose(
+                    xsens_sampler.segment_names,
+                    initial_xsens_pose.positions_m,
+                    initial_xsens_pose.quaternions_wxyz,
+                )
+            ).positions_m
+        for mode in xsens_actors:
+            base_positions = (
+                initial_g1_positions
+                if mode == "g1_xsens"
+                else initial_xsens_pose.positions_m
+            )
+            assert base_positions is not None
+            initial_base_positions.append(
+                np.asarray(base_positions[0], dtype=float) + xsens_actor_offsets[mode]
+            )
+            initial_base_orientations.append(
+                np.asarray(initial_xsens_pose.quaternions_wxyz[0], dtype=float)
+            )
+    initial_camera = compute_initial_camera_view(initial_base_positions, initial_base_orientations)
+
+    @server.on_client_connect
+    def _set_initial_camera(client: viser.ClientHandle) -> None:
+        client.camera.position = initial_camera.position
+        client.camera.look_at = initial_camera.look_at
+        client.camera.up_direction = np.array([0.0, 0.0, 1.0])
+
+    for connected_client in server.get_clients().values():
+        _set_initial_camera(connected_client)
 
     with server.gui.add_folder("Camera", order=20.0):
         camera_follow = CameraFollowController(server, initial_enabled=config.camera_follow)

@@ -15,6 +15,7 @@ from holosoma_retargeting.viser_player import (
     add_tennis_racket_control,
     compute_camera_follow_target,
     compute_ground_plane_bounds,
+    compute_initial_camera_view,
     resolve_actor_modes,
     resolve_record_output_path,
     resolve_xsens_actor_offsets,
@@ -40,6 +41,29 @@ def test_camera_follow_target_centers_each_actor_equally() -> None:
 def test_camera_follow_target_rejects_missing_actors() -> None:
     with pytest.raises(ValueError, match="At least one robot or avatar"):
         compute_camera_follow_target()
+
+
+def test_initial_camera_uses_all_floating_base_poses() -> None:
+    half_turn_about_z = np.array([0.0, 0.0, 0.0, 1.0])
+    view = compute_initial_camera_view(
+        (np.array([0.0, -2.0, 1.0]), np.array([0.0, 2.0, 1.0])),
+        (np.array([1.0, 0.0, 0.0, 0.0]), half_turn_about_z),
+    )
+
+    np.testing.assert_allclose(view.look_at, [0.0, 0.0, 1.0])
+    # Opposing headings fall back to the first base, and the actor spread widens the view.
+    np.testing.assert_allclose(view.position, [6.0, 0.0, 3.1])
+
+
+def test_initial_camera_rotates_with_mean_floating_base_heading() -> None:
+    quarter_turn_about_z = np.array([np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)])
+    view = compute_initial_camera_view(
+        (np.array([1.0, 2.0, 0.8]),),
+        (quarter_turn_about_z,),
+    )
+
+    np.testing.assert_allclose(view.look_at, [1.0, 2.0, 0.8])
+    np.testing.assert_allclose(view.position, [1.0, 5.0, 1.85], atol=1e-12)
 
 
 def test_camera_follow_controller_preserves_view_offset_and_can_be_disabled() -> None:
