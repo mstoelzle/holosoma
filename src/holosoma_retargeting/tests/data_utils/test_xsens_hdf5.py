@@ -183,6 +183,42 @@ def test_loader_applies_frame_window_after_time_sampling(tmp_path) -> None:
     np.testing.assert_allclose(motion.positions_m[:, 0, 0], [2.0, 4.0])
 
 
+def test_loader_selects_sparse_post_resampling_frames_as_uniform_storyboard(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_sample.hdf5"
+    times_s = np.arange(9, dtype=float) / 60.0
+    positions_m = np.zeros((9, len(XSENS_BODY_SEGMENT_NAMES), 3), dtype=float)
+    positions_m[:, 0, 0] = np.arange(9)
+
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
+        _write_identity_orientations(hdf5_file, times_s, XSENS_BODY_SEGMENT_NAMES)
+
+    motion = load_xsens_hdf5_motion(
+        hdf5_path,
+        target_fps=30.0,
+        frame_indices=(0, 2, 4),
+    )
+
+    np.testing.assert_allclose(motion.times_s, np.arange(3) / 30.0)
+    np.testing.assert_allclose(motion.positions_m[:, 0, 0], [0.0, 4.0, 8.0])
+
+
+def test_sparse_frames_reject_windows_duplicates_and_out_of_range_indices(tmp_path) -> None:
+    hdf5_path = tmp_path / "xsens_sample.hdf5"
+    times_s = np.arange(3, dtype=float) / 30.0
+    positions_m = np.zeros((3, len(XSENS_BODY_SEGMENT_NAMES), 3), dtype=float)
+    with h5py.File(hdf5_path, "w") as hdf5_file:
+        _write_stream(hdf5_file, "body_position_xyz_m", positions_m, times_s, XSENS_BODY_SEGMENT_NAMES)
+        _write_identity_orientations(hdf5_file, times_s, XSENS_BODY_SEGMENT_NAMES)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        load_xsens_hdf5_motion(hdf5_path, frame_start=1, frame_indices=(0,))
+    with pytest.raises(ValueError, match="duplicates"):
+        load_xsens_hdf5_motion(hdf5_path, frame_indices=(0, 0))
+    with pytest.raises(ValueError, match="post-resampling range"):
+        load_xsens_hdf5_motion(hdf5_path, frame_indices=(3,))
+
+
 def test_motion_loader_reads_sampled_dynamic_orientations_and_ignores_extra_segment(tmp_path) -> None:
     hdf5_path = tmp_path / "xsens_orientation_sample.hdf5"
     times_s = np.arange(5, dtype=float) / 60.0

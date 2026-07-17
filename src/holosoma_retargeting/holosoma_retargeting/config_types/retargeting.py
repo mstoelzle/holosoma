@@ -29,6 +29,9 @@ class XsensMorphologyConfig:
     g1_model_path: Path | None = None
     """Optional G1 MuJoCo XML override used to measure target proportions."""
 
+    track_orientations: bool = True
+    """Apply T-pose-calibrated Xsens segment orientations to the G1 optimizer."""
+
 
 @dataclass
 class RetargetingConfig:

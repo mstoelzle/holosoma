@@ -106,6 +106,16 @@ The G1-proportioned mode defaults to collapsed compound-joint offsets and dynami
 these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.grounding none`; use
 `--xsens-morphology.g1-model-path <model.xml>` to measure proportions from a non-default G1 MuJoCo model.
 
+This default path also calibrates global Xsens segment frames against the corresponding G1 link frames using the
+recording's T-pose, then tracks torso, head, foot, and hand orientations during optimization. Supply an existing
+artifact with `--retargeter.orientation.calibration-path <calibration.npz>` to skip the in-memory calibration, or
+use `--xsens-morphology.no-track-orientations` for the legacy position-only optimizer.
+
+For sparse debugging, `--motion-data-config.frame-indices 100 250 400` selects post-resampling frames and treats
+them as a uniformly timed storyboard. Use the same indices in `viser_player.py` with `--xsens-target-fps 30` and
+`--xsens-frame-indices 100 250 400`; increasing `--retargeter.iterations-per-frame` helps each widely separated
+keyframe converge from the previous one.
+
 The Xsens tennis files are local demo inputs; this code path works when `.hdf5`/`.h5` files are present in
 `demo_data/xsens_tennis`, but the retargeting code itself does not require those large files to be tracked by Git.
 

@@ -97,6 +97,12 @@ class RetargeterConfig:
     step_size: float = 0.2
     """Trust region for each SQP iteration."""
 
+    initial_iterations: int = 50
+    """SQP iterations used to solve the first motion frame."""
+
+    iterations_per_frame: int = 10
+    """SQP iterations used for each subsequent frame; raise for sparse keyframes."""
+
     visualize: bool = False
     """Whether to visualize the retargeting process."""
 

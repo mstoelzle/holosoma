@@ -416,6 +416,8 @@ class MotionDataConfig:
     target_fps: float | None = 30.0
     frame_start: int = 0
     max_frames: int | None = None
+    frame_indices: tuple[int, ...] | None = None
+    """Sparse post-resampling frame indices; mutually exclusive with frame_start/max_frames."""
 
     @property
     def resolved_demo_joints(self) -> list[str]:

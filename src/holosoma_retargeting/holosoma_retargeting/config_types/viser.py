@@ -127,6 +127,9 @@ class XsensViserConfig(ViserConfig):
     xsens_target_fps: float | None = None
     """Optional HDF5 pre-sampling rate. None preserves the native timestamps."""
 
+    xsens_frame_indices: tuple[int, ...] | None = None
+    """Sparse post-resampling frames to play as a uniformly timed storyboard."""
+
     show_xsens_meshes: bool = True
     """Whether Xsens avatar meshes are initially visible."""
 

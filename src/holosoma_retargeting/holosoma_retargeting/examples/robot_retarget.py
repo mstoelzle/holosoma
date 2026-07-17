@@ -23,7 +23,10 @@ if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
-from holosoma_retargeting.config_types.retargeter import RetargeterConfig  # noqa: E402
+from holosoma_retargeting.config_types.retargeter import (  # noqa: E402
+    OrientationTrackingConfig,
+    RetargeterConfig,
+)
 from holosoma_retargeting.config_types.retargeting import (  # noqa: E402
     RetargetingConfig,
     XsensMorphologyConfig,
@@ -56,7 +59,12 @@ from holosoma_retargeting.src.utils import (  # noqa: E402
 from holosoma_retargeting.xsens.morphology_adaptation import adapt_xsens_motion_to_g1  # noqa: E402
 from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
     XsensOrientationTargets,
+    build_xsens_orientation_targets,
     load_xsens_orientation_targets,
+)
+from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
+    XsensTposeCalibrationConfig,
+    solve_xsens_tpose_calibration,
 )
 
 # Configure logging
@@ -315,6 +323,7 @@ def load_motion_data(
                 target_fps=target_fps,
                 frame_start=motion_data_config.frame_start,
                 max_frames=motion_data_config.max_frames,
+                frame_indices=motion_data_config.frame_indices,
             )
             human_joints = xsens_motion.positions_m
 
@@ -556,6 +565,8 @@ def build_retargeter_kwargs_from_config(
         "self_collision": retargeter_config.self_collision,
         "orientation": retargeter_config.orientation,
         "step_size": retargeter_config.step_size,
+        "initial_iterations": retargeter_config.initial_iterations,
+        "iterations_per_frame": retargeter_config.iterations_per_frame,
         "visualize": retargeter_config.visualize,
         "debug": retargeter_config.debug,
         "w_nominal_tracking_init": retargeter_config.w_nominal_tracking_init,
@@ -567,27 +578,200 @@ def build_retargeter_kwargs_from_config(
 
 def load_orientation_targets_for_retargeting(
     *,
-    cfg: RetargetingConfig,
+    orientation_config: OrientationTrackingConfig,
+    robot_config: RobotConfig,
+    robot: str,
     data_format: str,
     task_type: str,
     xsens_motion: XsensHdf5Motion | None,
+    hdf5_path: Path | None,
 ) -> XsensOrientationTargets | None:
     """Load optional Xsens orientation/axis targets for retargeting."""
-    orientation_cfg = cfg.retargeter.orientation
-    if not orientation_cfg.enable:
+    if not orientation_config.enable:
         return None
     if data_format != "xsens" or task_type != "robot_only":
         raise ValueError("Orientation-aware retargeting currently supports only robot_only Xsens data")
-    if orientation_cfg.calibration_path is None:
-        raise ValueError("--retargeter.orientation.calibration-path is required when orientation tracking is enabled")
-
     if xsens_motion is None:
         raise ValueError("Loaded Xsens motion is required for orientation-aware retargeting")
-    return load_xsens_orientation_targets(
-        calibration_path=orientation_cfg.calibration_path,
+    if orientation_config.calibration_path is not None:
+        return load_xsens_orientation_targets(
+            calibration_path=orientation_config.calibration_path,
+            motion_quaternions_wijk=xsens_motion.quaternions_wijk,
+            segment_names=xsens_motion.segment_names,
+        )
+    if hdf5_path is None:
+        raise ValueError("The source Xsens HDF5 path is required for automatic orientation calibration")
+
+    logger.info("Calibrating Xsens-to-G1 segment-frame orientation offsets from the recording T-pose")
+    calibration = solve_xsens_tpose_calibration(
+        hdf5_path,
+        config=XsensTposeCalibrationConfig(
+            robot_type=robot,
+            robot_urdf_file=robot_config.ROBOT_URDF_FILE,
+            verbose=0,
+        ),
+    )
+    return build_xsens_orientation_targets(
+        orientation_names=calibration.active_orientation_mapping_names,
+        orientation_robot_link_names=calibration.robot_link_names,
+        orientation_offsets_wijk=calibration.orientation_offsets_wijk,
+        axis_names=calibration.axis_names,
+        axis_xsens_segment_names=calibration.axis_xsens_segment_names,
+        axis_local_tpose_xyz=calibration.axis_local_tpose_xyz,
+        axis_robot_start_link_names=calibration.axis_robot_start_link_names,
+        axis_robot_end_link_names=calibration.axis_robot_end_link_names,
+        axis_weights=calibration.axis_weights,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
         segment_names=xsens_motion.segment_names,
     )
+
+
+def resolve_orientation_tracking_config(
+    *,
+    retargeter_config: RetargeterConfig,
+    morphology_config: XsensMorphologyConfig,
+    data_format: str,
+    task_type: str,
+    robot: str,
+) -> RetargeterConfig:
+    """Enable calibrated orientations for the default G1-proportioned Xsens path."""
+    auto_enable = (
+        task_type == "robot_only"
+        and data_format == "xsens"
+        and robot == "g1"
+        and morphology_config.mode == "g1_proportioned"
+        and morphology_config.track_orientations
+    )
+    if not auto_enable or retargeter_config.orientation.enable:
+        return retargeter_config
+    return replace(
+        retargeter_config,
+        orientation=replace(retargeter_config.orientation, enable=True),
+    )
+
+
+def describe_retargeting_setup(
+    *,
+    retargeter: InteractionMeshRetargeter,
+    orientation_targets: XsensOrientationTargets | None,
+    q_nominal_list: np.ndarray | None,
+) -> tuple[str, ...]:
+    """Describe the active optimizer objectives, constraints, and rotation mappings."""
+
+    positional_pairs = ", ".join(
+        f"{source}->{target}" for source, target in retargeter.laplacian_match_links.items()
+    )
+    regularized_dofs = int(np.count_nonzero(np.asarray(retargeter.Q_diag, dtype=float)))
+    nominal_active = (
+        q_nominal_list is not None
+        and retargeter.w_nominal_tracking_init > 0.0
+        and len(retargeter.track_nominal_indices) > 0
+    )
+    nominal_status = "present" if q_nominal_list is not None else "absent"
+    foot_sticking_active = retargeter.activate_foot_sticking and retargeter.q_a_init_idx < 12
+    self_collision_active = bool(
+        retargeter._self_collision_config is not None and retargeter._self_collision_config.enable
+    )
+
+    lines = [
+        "Retargeting optimization setup:",
+        "  Objectives:",
+        (
+            "    [active] interaction-mesh positional/relational tracking "
+            f"(weight={retargeter.laplacian_weights}, mapped anchors={len(retargeter.laplacian_match_links)}): "
+            f"{positional_pairs}"
+        ),
+        f"    [active] temporal smoothness (weight={retargeter.smooth_weight})",
+        (
+            f"    [{'active' if regularized_dofs else 'inactive'}] joint regularization "
+            f"(weighted DoFs={regularized_dofs})"
+        ),
+            (
+                f"    [{'active' if nominal_active else 'inactive'}] nominal-pose tracking "
+                f"(weight={retargeter.w_nominal_tracking_init}, nominal trajectory={nominal_status})"
+            ),
+    ]
+
+    if orientation_targets is None:
+        lines.extend(
+            [
+                "    [inactive] full segment-orientation tracking",
+                "    [inactive] segment-axis direction tracking",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                (
+                    "    [active] full segment-orientation tracking "
+                    f"(weight={retargeter.orientation_config.orientation_weight}, "
+                    f"mappings={len(orientation_targets.orientation_names)})"
+                ),
+                (
+                    "    [active] segment-axis direction tracking "
+                    f"(weight={retargeter.orientation_config.axis_weight}, "
+                    f"axes={len(orientation_targets.axis_names)}): "
+                    + ", ".join(orientation_targets.axis_names)
+                ),
+            ]
+        )
+
+    lines.extend(
+        [
+            "  Hard constraints:",
+            f"    [{'active' if retargeter.activate_joint_limits else 'inactive'}] joint limits",
+            (
+                f"    [{'active' if retargeter.activate_obj_non_penetration else 'inactive'}] "
+                "ground/object non-penetration"
+            ),
+            f"    [{'active' if foot_sticking_active else 'inactive'}] detected foot sticking",
+            f"    [{'active' if retargeter.foot_lock.enable else 'inactive'}] explicit foot-lock windows",
+            f"    [{'active' if self_collision_active else 'inactive'}] self-collision avoidance",
+            f"    [active] SQP trust region (step_size={retargeter.step_size})",
+            "  Rotational correspondence:",
+        ]
+    )
+
+    if orientation_targets is None:
+        lines.append("    none; robot link orientations are unconstrained by Xsens segment rotations")
+        return tuple(lines)
+
+    lines.extend(
+        [
+            "    R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset",
+            "    R_offset = R_Xsens_segment_Tpose_world^T @ R_G1_link_Tpose_world",
+        ]
+    )
+    for xsens_name, robot_link, offset in zip(
+        orientation_targets.orientation_names,
+        orientation_targets.orientation_robot_link_names,
+        orientation_targets.orientation_offsets_wijk,
+    ):
+        normalized_offset = np.asarray(offset, dtype=float)
+        normalized_offset /= max(float(np.linalg.norm(normalized_offset)), 1e-12)
+        offset_angle_deg = float(np.degrees(2.0 * np.arccos(np.clip(abs(normalized_offset[0]), 0.0, 1.0))))
+        offset_text = ", ".join(f"{value:+.6f}" for value in normalized_offset)
+        lines.append(
+            f"    {xsens_name} -> {robot_link}: offset_wxyz=({offset_text}), "
+            f"offset_angle={offset_angle_deg:.2f} deg"
+        )
+    return tuple(lines)
+
+
+def log_retargeting_setup(
+    *,
+    retargeter: InteractionMeshRetargeter,
+    orientation_targets: XsensOrientationTargets | None,
+    q_nominal_list: np.ndarray | None,
+) -> None:
+    """Log the active optimizer setup once before motion retargeting."""
+
+    for line in describe_retargeting_setup(
+        retargeter=retargeter,
+        orientation_targets=orientation_targets,
+        q_nominal_list=q_nominal_list,
+    ):
+        logger.info("%s", line)
 
 
 def initialize_robot_pose(
@@ -728,6 +912,13 @@ def main(cfg: RetargetingConfig) -> None:
         robot=robot,
         config=cfg.xsens_morphology,
     )
+    retargeter_config = resolve_orientation_tracking_config(
+        retargeter_config=cfg.retargeter,
+        morphology_config=cfg.xsens_morphology,
+        data_format=data_format,
+        task_type=task_type,
+        robot=robot,
+    )
 
     os.makedirs(save_dir, exist_ok=True)
     logger.info("Task: %s, Type: %s, Format: %s", task_name, task_type, data_format)
@@ -755,6 +946,7 @@ def main(cfg: RetargetingConfig) -> None:
     human_joints, object_poses, smpl_scale, xsens_motion = load_motion_data(
         task_type, data_format, data_path, task_name, constants, cfg.motion_data_config
     )
+    hdf5_path = None
     if xsens_motion is not None:
         hdf5_path = resolve_xsens_hdf5_path(data_path, task_name)
         human_joints, smpl_scale = prepare_xsens_motion_for_retargeting(
@@ -765,10 +957,13 @@ def main(cfg: RetargetingConfig) -> None:
             morphology_config=cfg.xsens_morphology,
         )
     orientation_targets = load_orientation_targets_for_retargeting(
-        cfg=cfg,
+        orientation_config=retargeter_config.orientation,
+        robot_config=cfg.robot_config,
+        robot=robot,
         data_format=data_format,
         task_type=task_type,
         xsens_motion=xsens_motion,
+        hdf5_path=hdf5_path,
     )
     if (
         orientation_targets is not None
@@ -794,7 +989,12 @@ def main(cfg: RetargetingConfig) -> None:
     )
 
     # Create retargeter
-    retargeter_kwargs = build_retargeter_kwargs_from_config(cfg.retargeter, constants, object_urdf_path, task_type)
+    retargeter_kwargs = build_retargeter_kwargs_from_config(
+        retargeter_config,
+        constants,
+        object_urdf_path,
+        task_type,
+    )
     retargeter = InteractionMeshRetargeter(**retargeter_kwargs)
     logger.info("Retargeter created")
 
@@ -838,6 +1038,11 @@ def main(cfg: RetargetingConfig) -> None:
     dest_res_path = determine_output_path(task_type, save_dir, task_name, cfg.augmentation)
 
     # Retarget motion
+    log_retargeting_setup(
+        retargeter=retargeter,
+        orientation_targets=orientation_targets,
+        q_nominal_list=q_nominal,
+    )
     logger.info("Starting retargeting...")
     retargeter.retarget_motion(
         human_joint_motions=human_joints,

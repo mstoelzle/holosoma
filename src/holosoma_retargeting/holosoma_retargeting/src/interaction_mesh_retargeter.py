@@ -58,6 +58,8 @@ class InteractionMeshRetargeter:
         activate_obj_non_penetration: bool = True,
         activate_joint_limits: bool = True,
         step_size: float = 0.2,
+        initial_iterations: int = 50,
+        iterations_per_frame: int = 10,
         collision_detection_threshold: float = 0.1,
         penetration_tolerance: float = 1e-3,
         foot_sticking_tolerance: float = 1e-3,
@@ -101,6 +103,10 @@ class InteractionMeshRetargeter:
         self.foot_links = dict(zip(task_constants.FOOT_STICKING_LINKS, task_constants.FOOT_STICKING_LINKS))
         self.penetration_tolerance = penetration_tolerance
         self.step_size = step_size
+        if initial_iterations <= 0 or iterations_per_frame <= 0:
+            raise ValueError("Retargeting iteration counts must be positive")
+        self.initial_iterations = initial_iterations
+        self.iterations_per_frame = iterations_per_frame
         self.visualize = visualize
         self.debug = debug
         self.demo_joints = task_constants.DEMO_JOINTS
@@ -507,7 +513,7 @@ class InteractionMeshRetargeter:
                     q_a_nominal=(q_nominal_list[i, self.q_a_indices] if q_nominal_list is not None else None),
                     orientation_targets=orientation_targets,
                     init_t=i == 0,
-                    n_iter=50 if i == 0 else 10,
+                    n_iter=self.initial_iterations if i == 0 else self.iterations_per_frame,
                     frame_idx=i,
                 )
                 if orientation_targets is not None:
@@ -557,7 +563,10 @@ class InteractionMeshRetargeter:
                 [] if orientation_targets is None else orientation_targets.orientation_names, dtype=str
             ),
             orientation_errors_rad=np.asarray(orientation_error_history, dtype=float),
-            axis_error_names=np.asarray([] if orientation_targets is None else orientation_targets.axis_names, dtype=str),
+            axis_error_names=np.asarray(
+                [] if orientation_targets is None else orientation_targets.axis_names,
+                dtype=str,
+            ),
             axis_errors_deg=np.asarray(axis_error_history, dtype=float),
             active_orientation_mapping_names=np.asarray(
                 [] if orientation_targets is None else orientation_targets.orientation_names, dtype=str
@@ -854,7 +863,11 @@ class InteractionMeshRetargeter:
             )
         raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
 
-    def _frame_position_jacobian(self, frame_name: str, point_offset: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def _frame_position_jacobian(
+        self,
+        frame_name: str,
+        point_offset: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         position, rotation, body_id = self._frame_pose(frame_name)
         if point_offset is not None:
             position = position + rotation @ np.asarray(point_offset, dtype=float).reshape(3)
@@ -1352,8 +1365,6 @@ class InteractionMeshRetargeter:
         T[dadr : dadr + 3, qadr : qadr + 3] = np.eye(3)
 
         # Angular block: ω_* = 2 * E_*(q) * quat_dot
-        w, x, y, z = self.robot_data.qpos[qadr + 3 : qadr + 7]
-
         def get_e_world(qw, qx, qy, qz):
             return np.array(
                 [

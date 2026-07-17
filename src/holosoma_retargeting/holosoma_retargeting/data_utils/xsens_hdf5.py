@@ -451,11 +451,30 @@ def sample_indices_by_time(times_s: np.ndarray, target_fps: float | None) -> np.
     return np.unique(indices)
 
 
-def _slice_sample_indices(sample_indices: np.ndarray, frame_start: int, max_frames: int | None) -> np.ndarray:
+def _slice_sample_indices(
+    sample_indices: np.ndarray,
+    frame_start: int,
+    max_frames: int | None,
+    frame_indices: tuple[int, ...] | None,
+) -> np.ndarray:
     if frame_start < 0:
         raise ValueError("frame_start must be non-negative")
     if max_frames is not None and max_frames <= 0:
         raise ValueError("max_frames must be positive")
+
+    if frame_indices is not None:
+        if frame_start != 0 or max_frames is not None:
+            raise ValueError("frame_indices is mutually exclusive with frame_start and max_frames")
+        sparse_indices = np.asarray(frame_indices, dtype=int)
+        if sparse_indices.ndim != 1 or sparse_indices.size == 0:
+            raise ValueError("frame_indices must contain at least one index")
+        if np.any(sparse_indices < 0) or np.any(sparse_indices >= sample_indices.size):
+            raise ValueError(
+                f"frame_indices must be within the post-resampling range [0, {sample_indices.size - 1}]"
+            )
+        if np.unique(sparse_indices).size != sparse_indices.size:
+            raise ValueError("frame_indices must not contain duplicates")
+        return sample_indices[sparse_indices]
 
     sample_indices = sample_indices[frame_start:]
     if max_frames is not None:
@@ -470,6 +489,7 @@ def load_xsens_hdf5_motion(
     target_fps: float | None = 30.0,
     frame_start: int = 0,
     max_frames: int | None = None,
+    frame_indices: tuple[int, ...] | None = None,
     *,
     include_tracked_props: bool = False,
 ) -> XsensHdf5Motion:
@@ -498,7 +518,7 @@ def load_xsens_hdf5_motion(
     positions = transform_xsens_stream_to_retargeting(positions, stream_name)
 
     sample_indices = sample_indices_by_time(times_s, target_fps)
-    sample_indices = _slice_sample_indices(sample_indices, frame_start, max_frames)
+    sample_indices = _slice_sample_indices(sample_indices, frame_start, max_frames, frame_indices)
     quaternions = _reshape_quaternion_data(quaternions, orientation_segment_names)
     selected_orientation_names, orientation_source_indices = _body_segment_indices(
         orientation_segment_names,
@@ -514,9 +534,19 @@ def load_xsens_hdf5_motion(
     quaternions = _normalize_quaternions_wijk(quaternions[:, orientation_source_indices, :])
     quaternions = transform_xsens_orientation_stream_to_retargeting(quaternions, stream_name)
 
+    selected_times_s = times_s[sample_indices]
+    if frame_indices is not None:
+        if target_fps is not None:
+            storyboard_period_s = 1.0 / target_fps
+        else:
+            source_intervals_s = np.diff(times_s)
+            positive_intervals_s = source_intervals_s[source_intervals_s > 0.0]
+            storyboard_period_s = float(np.median(positive_intervals_s)) if positive_intervals_s.size else 1.0 / 30.0
+        selected_times_s = np.arange(sample_indices.size, dtype=float) * storyboard_period_s
+
     return XsensHdf5Motion(
         positions_m=positions[sample_indices],
-        times_s=times_s[sample_indices],
+        times_s=selected_times_s,
         stream_name=stream_name,
         segment_names=selected_segment_names,
         source_indices=source_indices,

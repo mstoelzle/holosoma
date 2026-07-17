@@ -30,6 +30,7 @@ class XsensOrientationTargets:
 
     orientation_names: list[str]
     orientation_robot_link_names: list[str]
+    orientation_offsets_wijk: np.ndarray
     orientation_target_rotations: np.ndarray
     axis_names: list[str]
     axis_xsens_segment_names: list[str]
@@ -208,6 +209,71 @@ def build_xsens_axis_calibration_metadata(
     }
 
 
+def build_xsens_orientation_targets(
+    *,
+    orientation_names: list[str],
+    orientation_robot_link_names: list[str],
+    orientation_offsets_wijk: np.ndarray,
+    axis_names: list[str],
+    axis_xsens_segment_names: list[str],
+    axis_local_tpose_xyz: np.ndarray,
+    axis_robot_start_link_names: list[str],
+    axis_robot_end_link_names: list[str],
+    axis_weights: np.ndarray,
+    motion_quaternions_wijk: np.ndarray,
+    segment_names: list[str],
+) -> XsensOrientationTargets:
+    """Create dynamic orientation and axis targets from calibration metadata."""
+
+    motion_quaternions = np.asarray(motion_quaternions_wijk, dtype=float)
+    if motion_quaternions.ndim != 3 or motion_quaternions.shape[-1] != 4:
+        raise ValueError(f"Expected motion quaternions with shape (T, J, 4), got {motion_quaternions.shape}")
+    if motion_quaternions.shape[1] != len(segment_names):
+        raise ValueError(
+            "Motion quaternion segment count does not match segment names: "
+            f"{motion_quaternions.shape[1]} vs {len(segment_names)}"
+        )
+
+    rotations = quat_wijk_to_matrix(motion_quaternions)
+    segment_to_index = {name: idx for idx, name in enumerate(segment_names)}
+
+    orientation_offsets = np.asarray(orientation_offsets_wijk, dtype=float)
+    if (
+        len(orientation_names) != len(orientation_robot_link_names)
+        or len(orientation_names) != len(orientation_offsets)
+    ):
+        raise ValueError("Calibration orientation mapping names, robot links, and offsets must have the same length")
+    offset_rotations = quat_wijk_to_matrix(orientation_offsets)
+    orientation_targets = np.zeros((motion_quaternions.shape[0], len(orientation_names), 3, 3), dtype=float)
+    for mapping_idx, xsens_name in enumerate(orientation_names):
+        if xsens_name not in segment_to_index:
+            raise ValueError(f"Calibration orientation segment is not present in motion data: {xsens_name}")
+        source_idx = segment_to_index[xsens_name]
+        orientation_targets[:, mapping_idx] = rotations[:, source_idx] @ offset_rotations[mapping_idx]
+
+    axis_targets = np.zeros((motion_quaternions.shape[0], len(axis_names), 3), dtype=float)
+    for axis_idx, xsens_name in enumerate(axis_xsens_segment_names):
+        if xsens_name not in segment_to_index:
+            raise ValueError(f"Calibration axis-driving segment is not present in motion data: {xsens_name}")
+        source_idx = segment_to_index[xsens_name]
+        axis_targets[:, axis_idx] = rotations[:, source_idx] @ axis_local_tpose_xyz[axis_idx]
+        norms = np.linalg.norm(axis_targets[:, axis_idx], axis=-1, keepdims=True)
+        axis_targets[:, axis_idx] = axis_targets[:, axis_idx] / np.maximum(norms, 1e-12)
+
+    return XsensOrientationTargets(
+        orientation_names=orientation_names,
+        orientation_robot_link_names=orientation_robot_link_names,
+        orientation_offsets_wijk=orientation_offsets,
+        orientation_target_rotations=orientation_targets,
+        axis_names=axis_names,
+        axis_xsens_segment_names=axis_xsens_segment_names,
+        axis_robot_start_link_names=axis_robot_start_link_names,
+        axis_robot_end_link_names=axis_robot_end_link_names,
+        axis_target_vectors=axis_targets,
+        axis_weights=np.asarray(axis_weights, dtype=float),
+    )
+
+
 def load_xsens_orientation_targets(
     *,
     calibration_path: str | Path,
@@ -238,55 +304,16 @@ def load_xsens_orientation_targets(
                 f"Regenerate it with examples/xsens_tennis/calibrate_tpose.py. Missing: {missing}"
             )
 
-        orientation_names = [str(value) for value in data["active_orientation_mapping_names"]]
-        orientation_robot_links = [str(value) for value in data["robot_link_names"]]
-        orientation_offsets = np.asarray(data["orientation_offsets_wijk"], dtype=float)
-        axis_names = [str(value) for value in data["axis_names"]]
-        axis_segments = [str(value) for value in data["axis_xsens_segment_names"]]
-        axis_local_tpose_xyz = np.asarray(data["axis_local_tpose_xyz"], dtype=float)
-        axis_robot_start_links = [str(value) for value in data["axis_robot_start_link_names"]]
-        axis_robot_end_links = [str(value) for value in data["axis_robot_end_link_names"]]
-        axis_weights = np.asarray(data["axis_weights"], dtype=float)
-
-    motion_quaternions = np.asarray(motion_quaternions_wijk, dtype=float)
-    if motion_quaternions.ndim != 3 or motion_quaternions.shape[-1] != 4:
-        raise ValueError(f"Expected motion quaternions with shape (T, J, 4), got {motion_quaternions.shape}")
-    if motion_quaternions.shape[1] != len(segment_names):
-        raise ValueError(
-            "Motion quaternion segment count does not match segment names: "
-            f"{motion_quaternions.shape[1]} vs {len(segment_names)}"
+        return build_xsens_orientation_targets(
+            orientation_names=[str(value) for value in data["active_orientation_mapping_names"]],
+            orientation_robot_link_names=[str(value) for value in data["robot_link_names"]],
+            orientation_offsets_wijk=np.asarray(data["orientation_offsets_wijk"], dtype=float),
+            axis_names=[str(value) for value in data["axis_names"]],
+            axis_xsens_segment_names=[str(value) for value in data["axis_xsens_segment_names"]],
+            axis_local_tpose_xyz=np.asarray(data["axis_local_tpose_xyz"], dtype=float),
+            axis_robot_start_link_names=[str(value) for value in data["axis_robot_start_link_names"]],
+            axis_robot_end_link_names=[str(value) for value in data["axis_robot_end_link_names"]],
+            axis_weights=np.asarray(data["axis_weights"], dtype=float),
+            motion_quaternions_wijk=motion_quaternions_wijk,
+            segment_names=segment_names,
         )
-
-    rotations = quat_wijk_to_matrix(motion_quaternions)
-    segment_to_index = {name: idx for idx, name in enumerate(segment_names)}
-
-    if len(orientation_names) != len(orientation_robot_links) or len(orientation_names) != len(orientation_offsets):
-        raise ValueError("Calibration orientation mapping names, robot links, and offsets must have the same length")
-    offset_rotations = quat_wijk_to_matrix(orientation_offsets)
-    orientation_targets = np.zeros((motion_quaternions.shape[0], len(orientation_names), 3, 3), dtype=float)
-    for mapping_idx, xsens_name in enumerate(orientation_names):
-        if xsens_name not in segment_to_index:
-            raise ValueError(f"Calibration orientation segment is not present in motion data: {xsens_name}")
-        source_idx = segment_to_index[xsens_name]
-        orientation_targets[:, mapping_idx] = rotations[:, source_idx] @ offset_rotations[mapping_idx]
-
-    axis_targets = np.zeros((motion_quaternions.shape[0], len(axis_names), 3), dtype=float)
-    for axis_idx, xsens_name in enumerate(axis_segments):
-        if xsens_name not in segment_to_index:
-            raise ValueError(f"Calibration axis-driving segment is not present in motion data: {xsens_name}")
-        source_idx = segment_to_index[xsens_name]
-        axis_targets[:, axis_idx] = rotations[:, source_idx] @ axis_local_tpose_xyz[axis_idx]
-        norms = np.linalg.norm(axis_targets[:, axis_idx], axis=-1, keepdims=True)
-        axis_targets[:, axis_idx] = axis_targets[:, axis_idx] / np.maximum(norms, 1e-12)
-
-    return XsensOrientationTargets(
-        orientation_names=orientation_names,
-        orientation_robot_link_names=orientation_robot_links,
-        orientation_target_rotations=orientation_targets,
-        axis_names=axis_names,
-        axis_xsens_segment_names=axis_segments,
-        axis_robot_start_link_names=axis_robot_start_links,
-        axis_robot_end_link_names=axis_robot_end_links,
-        axis_target_vectors=axis_targets,
-        axis_weights=axis_weights,
-    )

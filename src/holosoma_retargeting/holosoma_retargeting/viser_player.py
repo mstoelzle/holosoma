@@ -738,6 +738,7 @@ def main(cfg: XsensViserConfig) -> None:
         xsens_motion = load_xsens_hdf5_motion(
             resolve_package_path(cfg.xsens_hdf5),
             target_fps=cfg.xsens_target_fps,
+            frame_indices=cfg.xsens_frame_indices,
             include_tracked_props=True,
         )
     make_player(cfg, qpos=qpos, fps=fps, xsens_motion=xsens_motion)
