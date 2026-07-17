@@ -232,6 +232,60 @@ def test_preserved_offsets_appear_once_without_changing_rigid_lengths(
             assert 0.0 <= seam_width < 0.01
 
 
+@pytest.mark.parametrize("preserve_joint_offsets", [False, True])
+def test_joint_collars_remain_on_segment_axes_after_visual_scaling(
+    anthropometry: G1Anthropometry,
+    preserve_joint_offsets: bool,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(preserve_joint_offsets=preserve_joint_offsets),
+    )
+    bodies = model.body_map()
+    joints = compute_reference_joint_positions(model)
+
+    for side in ("Left", "Right"):
+        endpoint_bodies = {
+            f"{side}Shoulder": f"{side}UpperArm",
+            f"{side}UpperArm": f"{side}ForeArm",
+            f"{side}ForeArm": f"{side}Hand",
+            f"{side}UpperLeg": f"{side}LowerLeg",
+        }
+        endpoints = {
+            body_name: bodies[child_name].reference_pose.translation_m - bodies[body_name].reference_pose.translation_m
+            for body_name, child_name in endpoint_bodies.items()
+        }
+        endpoints[f"{side}LowerLeg"] = joints[f"{side}Ankle"] - bodies[f"{side}LowerLeg"].reference_pose.translation_m
+
+        for body_name, endpoint in endpoints.items():
+            collars = [mesh for mesh in bodies[body_name].meshes if "joint_collar" in mesh.name]
+            assert len(collars) == 1
+            collar_center = np.asarray(collars[0].vertices_m).mean(axis=0)
+            direction = endpoint / np.linalg.norm(endpoint)
+            endpoint_delta = endpoint - collar_center
+            axial_gap = float(np.dot(endpoint_delta, direction))
+            transverse_error = np.linalg.norm(endpoint_delta - axial_gap * direction)
+
+            assert 0.0 < axial_gap < 0.03
+            assert transverse_error < 1e-10
+
+            if body_name.endswith(("Shoulder", "UpperArm", "ForeArm")):
+                reference = np.array([1.0, 0.0, 0.0])
+                if abs(float(np.dot(direction, reference))) > 0.9:
+                    reference = np.array([0.0, 1.0, 0.0])
+                basis_u = np.cross(direction, reference)
+                basis_u /= np.linalg.norm(basis_u)
+                basis_v = np.cross(direction, basis_u)
+                vertices = np.vstack([mesh.vertices_m for mesh in bodies[body_name].meshes])
+                metric = "forearm" if body_name.endswith("ForeArm") else "upper_arm"
+                radii = np.asarray(anthropometry.segment_radii_m[metric])
+                np.testing.assert_allclose(
+                    [np.ptp(vertices @ basis_u), np.ptp(vertices @ basis_v)],
+                    2.0 * radii,
+                    atol=1e-12,
+                )
+
+
 def test_preserved_compound_edges_use_region_specific_canonical_frames(
     anthropometry: G1Anthropometry,
 ) -> None:

@@ -35,7 +35,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "7"
+G1_XSENS_REDUCTION_VERSION = "8"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -516,7 +516,13 @@ def _avatar_part_attachment(
 ) -> MeshAttachment:
     vertices = np.asarray(part.mesh.vertices, dtype=float).copy()
     if scale is not None:
-        vertices *= np.asarray(scale, dtype=float)
+        scale_array = np.asarray(scale, dtype=float)
+        if scale_array.shape == (3,):
+            vertices *= scale_array
+        elif scale_array.shape == (3, 3):
+            vertices = vertices @ scale_array.T
+        else:
+            raise ValueError(f"Mesh scale must have shape (3,) or (3, 3), got {scale_array.shape}")
     if translation is not None:
         vertices += np.asarray(translation, dtype=float)
     return MeshAttachment(
@@ -722,6 +728,36 @@ def _parts_bounds(parts: tuple[AvatarMeshPart, ...]) -> tuple[np.ndarray, np.nda
     return vertices.min(axis=0), vertices.max(axis=0)
 
 
+def _axis_preserving_transverse_scale(
+    parts: tuple[AvatarMeshPart, ...],
+    axis: np.ndarray,
+    radii: np.ndarray,
+) -> np.ndarray:
+    """Scale two transverse directions while preserving the segment axis."""
+
+    direction = np.asarray(axis, dtype=float)
+    length = float(np.linalg.norm(direction))
+    if length <= 1e-10:
+        raise ValueError("Cannot scale a zero-length segment")
+    direction /= length
+    reference = np.array([1.0, 0.0, 0.0])
+    if abs(float(np.dot(direction, reference))) > 0.9:
+        reference = np.array([0.0, 1.0, 0.0])
+    basis_u = np.cross(direction, reference)
+    basis_u /= np.linalg.norm(basis_u)
+    basis_v = np.cross(direction, basis_u)
+
+    vertices = np.vstack([np.asarray(part.mesh.vertices, dtype=float) for part in parts])
+    extent_u = float(np.ptp(vertices @ basis_u))
+    extent_v = float(np.ptp(vertices @ basis_v))
+    if extent_u <= 1e-10 or extent_v <= 1e-10:
+        raise ValueError("Cannot scale a segment with zero transverse extent")
+    target_radii = np.asarray(radii, dtype=float)
+    scale_u = 2.0 * float(target_radii[0]) / extent_u
+    scale_v = 2.0 * float(target_radii[1]) / extent_v
+    return np.outer(direction, direction) + scale_u * np.outer(basis_u, basis_u) + scale_v * np.outer(basis_v, basis_v)
+
+
 def _scaled_part_attachments(
     parts: tuple[AvatarMeshPart, ...],
     scale: np.ndarray,
@@ -792,14 +828,20 @@ def _shared_visual_attachments(
         "UpperArm": anthropometry.segment_radii_m["upper_arm"],
         "ForeArm": anthropometry.segment_radii_m["forearm"],
     }
+    # Shoulder and wrist adapters make some arm axes diagonal. Scale in each
+    # segment's local transverse basis so its authored joint endpoint remains
+    # unchanged; componentwise world-X/Z scaling would shorten those segments.
     for side in ("Left", "Right"):
         for kind, radii_values in transverse_targets.items():
             name = f"{side}{kind}"
-            part_min, part_max = _parts_bounds(shared_parts[name])
             radii = np.asarray(radii_values, dtype=float)
-            scale = np.ones(3)
-            scale[0] = 2.0 * radii[1] / (part_max[0] - part_min[0])
-            scale[2] = 2.0 * radii[0] / (part_max[2] - part_min[2])
+            distal_landmark = {
+                "Shoulder": f"j{side}Shoulder",
+                "UpperArm": f"j{side}Elbow",
+                "ForeArm": f"j{side}Wrist",
+            }[kind]
+            axis = proportions.landmarks_m[name][distal_landmark]
+            scale = _axis_preserving_transverse_scale(shared_parts[name], axis, radii)
             transforms[name] = (scale, np.zeros(3))
 
         for kind, metric in (("UpperLeg", "thigh"), ("LowerLeg", "shank")):
