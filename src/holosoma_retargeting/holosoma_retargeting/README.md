@@ -171,6 +171,10 @@ python examples/xsens_tennis/generate_g1_xsens_usd.py \
     --preserve-joint-offsets
 ```
 
+The collapsed G1 wrist span is carried on the forearm side of the virtual Xsens wrist, which is co-located with
+the hand-segment origin. Consequently, wrist rotation changes the hand orientation without making the fixed
+inter-axis span orbit with the hand or detach it from the forearm visual.
+
 Each command also writes a same-stem JSON report containing the raw G1 offsets, collapsed adapter offsets, applied
 spatial offsets, root anchors, independently measured target lengths, generated lengths, and validation residuals.
 The `g1_xsens` Viser mode preserves the recording's pelvis trajectory and global segment orientations, then

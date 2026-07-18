@@ -47,7 +47,6 @@ def _rigid_lengths(model) -> dict[str, float]:
                 bodies["LeftForeArm"].reference_pose.translation_m - bodies["LeftUpperArm"].reference_pose.translation_m
             )
         ),
-        "forearm": float(np.linalg.norm(joints["LeftWrist"] - bodies["LeftForeArm"].reference_pose.translation_m)),
         "thigh": float(
             np.linalg.norm(
                 bodies["LeftLowerLeg"].reference_pose.translation_m
@@ -153,7 +152,10 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
             bodies[f"{title}UpperArm"].reference_pose.translation_m
             - bodies[f"{title}Shoulder"].reference_pose.translation_m
         )
-        wrist_offset = bodies[f"{title}Hand"].reference_pose.translation_m - reference_joints[f"{title}Wrist"]
+        wrist_roll_center = bodies[f"{title}ForeArm"].reference_pose.translation_m + np.array(
+            [0.0, sign * anthropometry.lengths_m["forearm"], 0.0]
+        )
+        wrist_adapter = bodies[f"{title}Hand"].reference_pose.translation_m - wrist_roll_center
         shoulder_offsets[side] = shoulder_offset
 
         expected_shoulder_length = sum(
@@ -166,13 +168,18 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
             atol=1e-12,
         )
         np.testing.assert_allclose(
-            np.linalg.norm(wrist_offset),
+            np.linalg.norm(wrist_adapter),
             np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_wrist"]),
             atol=1e-12,
         )
-        assert sign * wrist_offset[1] > 0.08
-        assert np.linalg.norm(wrist_offset[[0, 2]]) < 0.01
-        np.testing.assert_allclose(joints[f"{title}Wrist"].child_frame.translation_m, -wrist_offset)
+        assert sign * wrist_adapter[1] > 0.08
+        assert np.linalg.norm(wrist_adapter[[0, 2]]) < 0.01
+        np.testing.assert_allclose(
+            reference_joints[f"{title}Wrist"],
+            bodies[f"{title}Hand"].reference_pose.translation_m,
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(joints[f"{title}Wrist"].child_frame.translation_m, np.zeros(3))
 
     upper_arm_span = np.linalg.norm(
         bodies["LeftUpperArm"].reference_pose.translation_m - bodies["RightUpperArm"].reference_pose.translation_m
@@ -206,7 +213,7 @@ def test_preserved_offsets_appear_once_without_changing_rigid_lengths(
         preserved_bodies["LeftUpperArm"].reference_pose.translation_m,
     )
     assert np.linalg.norm(preserved_joints["LeftHip"].child_frame.translation_m) > 0.0
-    assert np.linalg.norm(preserved_joints["LeftWrist"].child_frame.translation_m) > 0.0
+    np.testing.assert_allclose(preserved_joints["LeftWrist"].child_frame.translation_m, np.zeros(3))
     assert np.linalg.norm(preserved_joints["LeftAnkle"].child_frame.translation_m) > 0.0
     for name, value in _rigid_lengths(preserved).items():
         np.testing.assert_allclose(value, anthropometry.lengths_m[name], atol=1e-12)
@@ -305,7 +312,10 @@ def test_preserved_compound_edges_use_region_specific_canonical_frames(
             bodies[f"{title}UpperArm"].reference_pose.translation_m
             - bodies[f"{title}Shoulder"].reference_pose.translation_m
         )
-        wrist_offset = bodies[f"{title}Hand"].reference_pose.translation_m - joints[f"{title}Wrist"]
+        wrist_roll_center = bodies[f"{title}ForeArm"].reference_pose.translation_m + np.array(
+            [0.0, sign * anthropometry.lengths_m["forearm"], 0.0]
+        )
+        wrist_adapter = bodies[f"{title}Hand"].reference_pose.translation_m - wrist_roll_center
         hip_root = pelvis + anthropometry.root_anchors_m[f"{side}_hip"]
         hip_offset = bodies[f"{title}UpperLeg"].reference_pose.translation_m - hip_root
         ankle_offset = bodies[f"{title}Foot"].reference_pose.translation_m - joints[f"{title}Ankle"]
@@ -318,12 +328,13 @@ def test_preserved_compound_edges_use_region_specific_canonical_frames(
         assert sign * shoulder_offset[1] > 0.0
         assert shoulder_offset[2] < -0.1
         np.testing.assert_allclose(
-            np.linalg.norm(wrist_offset),
+            np.linalg.norm(wrist_adapter),
             np.linalg.norm(anthropometry.compound_offsets_m[f"{side}_wrist"]),
             atol=1e-12,
         )
-        assert sign * wrist_offset[1] > 0.08
-        assert np.linalg.norm(wrist_offset[[0, 2]]) < 0.01
+        assert sign * wrist_adapter[1] > 0.08
+        assert np.linalg.norm(wrist_adapter[[0, 2]]) < 0.01
+        np.testing.assert_allclose(joints[f"{title}Wrist"], bodies[f"{title}Hand"].reference_pose.translation_m)
         np.testing.assert_allclose(hip_offset, anthropometry.compound_offsets_m[f"{side}_hip"], atol=1e-12)
         assert abs(float(ankle_offset[0])) < 1e-10
         assert abs(float(ankle_offset[1])) < 1e-5
@@ -574,6 +585,58 @@ def test_collapsed_shoulder_adapter_interpolates_t_to_n_pose_over_motion(
         np.testing.assert_allclose(actual_offsets[-1], fit.npose_target_offset_m, atol=1e-12)
     np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
     np.testing.assert_array_equal(adapted.times_s, times_s)
+
+
+@pytest.mark.parametrize("preserve_joint_offsets", [False, True])
+def test_virtual_wrist_stays_at_hand_origin_under_large_hand_rotations(
+    anthropometry: G1Anthropometry,
+    preserve_joint_offsets: bool,
+) -> None:
+    model = build_g1_proportioned_xsens_tree(
+        anthropometry,
+        G1XsensReductionConfig(
+            preserve_joint_offsets=preserve_joint_offsets,
+            include_tennis_racket=False,
+        ),
+    )
+    source_names = tuple(str(body.metadata["xsens:sourceSegmentName"]) for body in model.bodies)
+    source_indices = {name: index for index, name in enumerate(source_names)}
+    adapter = build_xsens_morphology_adapter(model, source_names)
+    frame_count = 8
+    reference_positions = np.stack([body.reference_pose.translation_m for body in model.bodies])
+    positions = np.repeat(reference_positions[None, :, :], frame_count, axis=0)
+    orientations = np.zeros((frame_count, len(source_names), 4), dtype=float)
+    orientations[..., 0] = 1.0
+    wrist_angles = np.deg2rad(np.linspace(0.0, 140.0, frame_count))
+    for title, sign in (("Left", 1.0), ("Right", -1.0)):
+        hand_index = source_indices[f"{title}Hand"]
+        orientations[:, hand_index, 0] = np.cos(0.5 * wrist_angles)
+        orientations[:, hand_index, 1] = sign * np.sin(0.5 * wrist_angles)
+
+    adapted = adapter.adapt_motion(
+        KinematicMotion(
+            source_names,
+            positions,
+            orientations,
+            np.arange(frame_count, dtype=float) / 30.0,
+        )
+    )
+
+    for title in ("Left", "Right"):
+        forearm_index = source_indices[f"{title}ForeArm"]
+        hand_index = source_indices[f"{title}Hand"]
+        wrist = model.joint_map()[f"{title}Wrist"]
+        actual_offsets = adapted.positions_m[:, hand_index] - adapted.positions_m[:, forearm_index]
+        expected_offsets = np.repeat(wrist.parent_frame.translation_m[None, :], frame_count, axis=0)
+
+        np.testing.assert_allclose(wrist.child_frame.translation_m, np.zeros(3), atol=1e-12)
+        np.testing.assert_allclose(actual_offsets, expected_offsets, atol=1e-12)
+        np.testing.assert_allclose(
+            np.linalg.norm(actual_offsets, axis=1),
+            np.linalg.norm(wrist.parent_frame.translation_m),
+            atol=1e-12,
+        )
+    np.testing.assert_array_equal(adapted.orientations_wxyz, orientations)
 
 
 def test_xsens_lowest_sole_grounding_uses_shared_avatar_outsoles(

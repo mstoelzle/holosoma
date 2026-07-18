@@ -37,7 +37,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "9"
+G1_XSENS_REDUCTION_VERSION = "10"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -577,11 +577,12 @@ def _collapsed_adapter_offsets(anthropometry: G1Anthropometry, preserve: bool) -
     agrees with both canonical T- and N-pose G1 configurations.  Its reference
     T-pose displacement is the G1 shoulder chain's full edge-path length along
     the canonical arm axis.  The joint frames introduce the N-pose dependence.
-    Wrist segments retain their endpoint-equivalent transform because their
-    compound edges are already collinear.  The pelvis-to-hip adapter retains
-    its scalar extent along the idealized leg axis.  Spherical joints remain at
-    the downstream rigid-segment anchors, so independently measured rigid spans
-    are unchanged.
+    Wrist clusters retain their endpoint-equivalent span on the forearm side of
+    the virtual joint.  Co-locating that joint with the hand origin matches the
+    Xsens topology and prevents the collapsed span from orbiting with the hand
+    orientation.  The pelvis-to-hip adapter retains its scalar extent along the
+    idealized leg axis.  Independently measured rigid spans remain available
+    separately from these fixed adapter spans.
     """
 
     result = {name: np.zeros(3, dtype=float) for name in anthropometry.compound_offsets_m}
@@ -657,8 +658,8 @@ def _build_reference_layout(
             shoulder_fit = _fit_collapsed_shoulder_morphology(anthropometry, side, sign)
             joint_centers[f"{title}Shoulder"] = shoulder_root + shoulder_fit.parent_anchor_m
         positions[f"{title}ForeArm"] = positions[f"{title}UpperArm"] + arm_direction * lengths["upper_arm"]
-        wrist_center = positions[f"{title}ForeArm"] + arm_direction * lengths["forearm"]
-        positions[f"{title}Hand"] = wrist_center + offsets[f"{side}_wrist"] + adapters[f"{side}_wrist"]
+        wrist_roll_center = positions[f"{title}ForeArm"] + arm_direction * lengths["forearm"]
+        positions[f"{title}Hand"] = wrist_roll_center + offsets[f"{side}_wrist"] + adapters[f"{side}_wrist"]
 
         hip_root = np.asarray(anthropometry.root_anchors_m[f"{side}_hip"], dtype=float)
         hip_center = hip_root + offsets[f"{side}_hip"] + adapters[f"{side}_hip"]
@@ -668,11 +669,12 @@ def _build_reference_layout(
         positions[f"{title}Foot"] = ankle_center + offsets[f"{side}_ankle"]
         positions[f"{title}Toe"] = positions[f"{title}Foot"] + np.array([lengths["foot"], 0.0, 0.0])
 
-        # Preserved mode anchors the spherical joint at the proximal compound
-        # axis and carries the raw vector in the child frame. Collapsed mode
-        # puts the one virtual joint at the distal end of the straight adapter.
+        # Hip preserved mode keeps its joint at the proximal compound axis.
+        # The virtual wrist is always distal to the collapsed G1 wrist span and
+        # co-located with the Xsens hand origin.  This keeps the span attached to
+        # the forearm instead of rotating it with the hand.
         joint_centers[f"{title}Hip"] = hip_root if config.preserve_joint_offsets else hip_center
-        joint_centers[f"{title}Wrist"] = wrist_center
+        joint_centers[f"{title}Wrist"] = positions[f"{title}Hand"]
         joint_centers[f"{title}Ankle"] = ankle_center
 
     minimum_z = min(positions["LeftFoot"][2], positions["RightFoot"][2])
@@ -866,15 +868,7 @@ def _shared_visual_attachments(
     positions: Mapping[str, np.ndarray],
     joint_centers: Mapping[str, np.ndarray],
 ) -> dict[str, tuple[MeshAttachment, ...]]:
-    # A wrist adapter lies after the rigid forearm span. The Xsens visual
-    # factory has no separate adapter segment, so extend the existing forearm
-    # visual to the hand origin. Joint anchors remain untouched; this is
-    # strictly a longitudinal extent adjustment of the shared visual parts.
-    visual_joint_centers = dict(joint_centers)
-    for side in ("Left", "Right"):
-        if np.linalg.norm(positions[f"{side}Hand"] - joint_centers[f"{side}Wrist"]) > 1e-12:
-            visual_joint_centers[f"{side}Wrist"] = positions[f"{side}Hand"]
-    proportions = _g1_xsens_avatar_proportions_from_layout(anthropometry, positions, visual_joint_centers)
+    proportions = _g1_xsens_avatar_proportions_from_layout(anthropometry, positions, joint_centers)
     shared_parts = build_xsens_avatar_meshes(proportions)
     transforms: dict[str, tuple[np.ndarray, np.ndarray]] = {
         name: (np.ones(3), np.zeros(3)) for name in proportions.segment_names
@@ -922,7 +916,7 @@ def _shared_visual_attachments(
         "UpperArm": anthropometry.segment_radii_m["upper_arm"],
         "ForeArm": anthropometry.segment_radii_m["forearm"],
     }
-    # Shoulder and wrist adapters make some arm axes diagonal. Scale in each
+    # Shoulder and compound-wrist spans make some arm axes diagonal. Scale in each
     # segment's local transverse basis so its authored joint endpoint remains
     # unchanged; componentwise world-X/Z scaling would shorten those segments.
     for side in ("Left", "Right"):
@@ -1095,6 +1089,7 @@ def build_g1_proportioned_xsens_tree(
 def _generated_lengths(model: KinematicTree, anthropometry: G1Anthropometry) -> dict[str, float]:
     body = model.body_map()
     joints = compute_reference_joint_positions(model)
+    wrist_offsets = _canonical_upper_limb_offsets(anthropometry)
 
     def body_distance(first: str, second: str) -> float:
         return float(
@@ -1112,9 +1107,13 @@ def _generated_lengths(model: KinematicTree, anthropometry: G1Anthropometry) -> 
         "upper_arm": 0.5
         * (body_distance("LeftForeArm", "LeftUpperArm") + body_distance("RightForeArm", "RightUpperArm")),
         "forearm": 0.5
-        * (
-            np.linalg.norm(joints["LeftWrist"] - body["LeftForeArm"].reference_pose.translation_m)
-            + np.linalg.norm(joints["RightWrist"] - body["RightForeArm"].reference_pose.translation_m)
+        * sum(
+            np.linalg.norm(
+                body[f"{title}Hand"].reference_pose.translation_m
+                - body[f"{title}ForeArm"].reference_pose.translation_m
+                - wrist_offsets[f"{side}_wrist"]
+            )
+            for side, title in (("left", "Left"), ("right", "Right"))
         ),
         "thigh": 0.5
         * (body_distance("LeftLowerLeg", "LeftUpperLeg") + body_distance("RightLowerLeg", "RightUpperLeg")),
