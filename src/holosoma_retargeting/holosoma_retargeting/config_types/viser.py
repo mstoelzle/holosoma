@@ -50,6 +50,9 @@ class ViserConfig:
     visual_fps_multiplier: int = 2
     """Visual FPS multiplier for interpolation."""
 
+    playback_speed: float = 1.0
+    """Initial playback speed relative to real time."""
+
     record_video: bool = False
     """Whether to record the Viser playback to a video file."""
 

@@ -231,6 +231,7 @@ def create_motion_control_sliders(
     contains_object_in_qpos: bool = True,
     initial_fps: int = 30,
     initial_interp_mult: int = 2,
+    initial_playback_speed: float = 1.0,
     loop: bool = True,
     frame_times_s: np.ndarray | None = None,
     on_pose_applied: Callable[[np.ndarray], None] | None = None,
@@ -256,6 +257,7 @@ def create_motion_control_sliders(
         contains_object_in_qpos: set True if motion_sequence includes the object 7D pose at the end.
         initial_fps: base FPS for playback.
         initial_interp_mult: visual upsampling multiplier.
+        initial_playback_speed: playback speed relative to real time.
         loop: whether to wrap around at the end.
         frame_times_s: optional source timestamps for the elapsed-time readout.
         on_pose_applied: optional callback receiving each displayed qpos pose.
@@ -292,6 +294,13 @@ def create_motion_control_sliders(
         )
         play_btn = server.gui.add_button("Play / Pause")
         fps_in = server.gui.add_number("FPS", initial_value=int(initial_fps), min=1, max=240, step=1)
+        playback_speed_in = server.gui.add_slider(
+            "Playback speed (x real-time)",
+            min=0.1,
+            max=2.0,
+            step=0.1,
+            initial_value=float(initial_playback_speed),
+        )
     with server.gui.add_folder("Smoothing", order=10.0):
         interp_mult_in = server.gui.add_number(
             "Visual FPS multiplier", initial_value=int(initial_interp_mult), min=1, max=8, step=1
@@ -399,6 +408,10 @@ def create_motion_control_sliders(
     def _(_evt) -> None:
         tick["next"] = time.perf_counter()
 
+    @playback_speed_in.on_update
+    def _(_evt) -> None:
+        tick["next"] = time.perf_counter()
+
     @interp_mult_in.on_update
     def _(_evt) -> None:
         tick["next"] = time.perf_counter()
@@ -426,7 +439,8 @@ def create_motion_control_sliders(
                 now = time.perf_counter()
                 fps_val = max(1, int(fps_in.value))
                 mult = max(1, int(interp_mult_in.value))
-                dt = 1.0 / (fps_val * mult)
+                playback_speed = max(0.1, float(playback_speed_in.value))
+                dt = 1.0 / (fps_val * mult * playback_speed)
 
                 if now >= tick["next"]:
                     # advance by one visual step
@@ -474,12 +488,14 @@ def create_timed_motion_control_sliders(
     *,
     initial_fps: float = 60.0,
     initial_interp_mult: int = 1,
+    initial_playback_speed: float = 1.0,
     loop: bool = True,
 ) -> Tuple[List[viser.GuiInputHandle[int]], List[float]]:
     """Create timestamp-driven playback controls for one or more scene actors.
 
     ``apply_time`` receives seconds relative to the first master timestamp. The
-    render rate controls how often it is called; motion speed always remains 1x.
+    Render rate controls how often it is called, while playback speed scales
+    elapsed real time.
     """
 
     raw_frame_times = np.asarray(frame_times_s, dtype=float).reshape(-1)
@@ -515,6 +531,13 @@ def create_timed_motion_control_sliders(
             max=240,
             step=1,
         )
+        playback_speed_in = server.gui.add_slider(
+            "Playback speed (x real-time)",
+            min=0.1,
+            max=2.0,
+            step=0.1,
+            initial_value=float(initial_playback_speed),
+        )
     with server.gui.add_folder("Smoothing", order=10.0):
         interp_mult_in = server.gui.add_number(
             "Visual FPS multiplier",
@@ -539,6 +562,12 @@ def create_timed_motion_control_sliders(
     @fps_in.on_update
     def _(_evt) -> None:
         clock["next_draw_s"] = time.perf_counter()
+
+    @playback_speed_in.on_update
+    def _(_evt) -> None:
+        now = time.perf_counter()
+        clock["last_wall_s"] = now
+        clock["next_draw_s"] = now
 
     @interp_mult_in.on_update
     def _(_evt) -> None:
@@ -570,7 +599,8 @@ def create_timed_motion_control_sliders(
 
             elapsed_s = max(0.0, now - clock["last_wall_s"])
             clock["last_wall_s"] = now
-            next_time_s = cursor["time_s"] + elapsed_s
+            playback_speed = max(0.1, float(playback_speed_in.value))
+            next_time_s = cursor["time_s"] + elapsed_s * playback_speed
             if next_time_s >= duration_s:
                 if loop and duration_s > 0.0:
                     next_time_s %= duration_s

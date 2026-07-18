@@ -625,6 +625,7 @@ def make_player(
             contains_object_in_qpos=config.assume_object_in_qpos,
             initial_fps=round(actual_robot_fps),
             initial_interp_mult=config.visual_fps_multiplier,
+            initial_playback_speed=config.playback_speed,
             loop=config.loop,
             frame_times_s=np.arange(qpos.shape[0], dtype=float) / actual_robot_fps,
             on_pose_applied=lambda pose: camera_follow.update_target(pose[0:3]),
@@ -720,6 +721,7 @@ def make_player(
         _apply_time,
         initial_fps=playback_fps,
         initial_interp_mult=config.visual_fps_multiplier,
+        initial_playback_speed=config.playback_speed,
         loop=config.loop,
     )
     return server
