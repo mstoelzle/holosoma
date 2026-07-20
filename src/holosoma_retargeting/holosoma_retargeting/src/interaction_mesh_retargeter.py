@@ -30,7 +30,12 @@ sys.path.insert(0, str(src_path))
 
 # Import with type ignore for mypy compatibility
 from mujoco_utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
+    MujocoFrameRef,
     _world_mesh_from_geom,
+    mujoco_frame_jacobians,
+    mujoco_frame_pose,
+    resolve_mujoco_frame,
+    resolve_mujoco_frames,
 )
 from utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
     calculate_laplacian_coordinates,
@@ -140,14 +145,10 @@ class InteractionMeshRetargeter:
         print("Loading robot model from: ", robot_xml_path)
 
         self.robot_data = mujoco.MjData(self.robot_model)
-        self._body_name_to_id = {
-            mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_BODY, i): i
-            for i in range(self.robot_model.nbody)
-        }
-        self._geom_name_to_id = {
-            mujoco.mj_id2name(self.robot_model, mujoco.mjtObj.mjOBJ_GEOM, i): i
-            for i in range(self.robot_model.ngeom)
-        }
+        self._frame_refs = resolve_mujoco_frames(
+            self.robot_model,
+            tuple(self.laplacian_match_links.values()) + tuple(self.foot_links.values()),
+        )
         self._init_self_collision(self._self_collision_config)
 
         if self.robot_data.qpos.shape[0] > 7 + self.task_constants.ROBOT_DOF:
@@ -583,6 +584,10 @@ class InteractionMeshRetargeter:
             axis_robot_end_link_names=np.asarray(
                 [] if orientation_targets is None else orientation_targets.axis_robot_end_link_names, dtype=str
             ),
+            axis_robot_local_vectors=np.asarray(
+                [] if orientation_targets is None else orientation_targets.axis_robot_local_vectors,
+                dtype=float,
+            ),
         )
         print("Saving results to path:", dest_res_path)
 
@@ -844,42 +849,39 @@ class InteractionMeshRetargeter:
             return rotvec * (clip / norm)
         return rotvec
 
+    def _frame_ref(self, frame_name: str) -> MujocoFrameRef:
+        """Return a cached frame reference, resolving uncommon frames lazily."""
+        if frame_name not in self._frame_refs:
+            self._frame_refs[frame_name] = resolve_mujoco_frame(self.robot_model, frame_name)
+        return self._frame_refs[frame_name]
+
     def _frame_pose(self, frame_name: str) -> tuple[np.ndarray, np.ndarray, int]:
-        """Return frame position, rotation, and owning body id for a body or geom name."""
-        if frame_name in self._body_name_to_id:
-            body_id = int(self._body_name_to_id[frame_name])
-            return (
-                self.robot_data.xpos[body_id].copy(),
-                self.robot_data.xmat[body_id].reshape(3, 3).copy(),
-                body_id,
-            )
-        if frame_name in self._geom_name_to_id:
-            geom_id = int(self._geom_name_to_id[frame_name])
-            body_id = int(self.robot_model.geom_bodyid[geom_id])
-            return (
-                self.robot_data.geom_xpos[geom_id].copy(),
-                self.robot_data.geom_xmat[geom_id].reshape(3, 3).copy(),
-                body_id,
-            )
-        raise KeyError(f"No MuJoCo body or geom named '{frame_name}'")
+        """Return frame position, rotation, and owning body id."""
+        ref = self._frame_ref(frame_name)
+        position, rotation = mujoco_frame_pose(self.robot_model, self.robot_data, ref)
+        return position, rotation, ref.body_id
 
     def _frame_position_jacobian(
         self,
         frame_name: str,
         point_offset: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
-        position, rotation, body_id = self._frame_pose(frame_name)
-        if point_offset is not None:
-            position = position + rotation @ np.asarray(point_offset, dtype=float).reshape(3)
-        jacobian = self._calc_contact_jacobian_from_point(body_id, position, input_world=True)
+        jacp, _jacr, position, _rotation = mujoco_frame_jacobians(
+            self.robot_model,
+            self.robot_data,
+            self._frame_ref(frame_name),
+            point_offset,
+        )
+        jacobian = jacp @ self._build_transform_qdot_to_qvel_fast()
         return np.asarray(jacobian, dtype=float), np.asarray(position, dtype=float)
 
     def _frame_rotational_jacobian(self, frame_name: str) -> tuple[np.ndarray, np.ndarray]:
-        position, rotation, body_id = self._frame_pose(frame_name)
-        Jp = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
-        Jr = np.zeros((3, self.robot_model.nv), dtype=np.float64, order="C")
-        mujoco.mj_jac(self.robot_model, self.robot_data, Jp, Jr, position.reshape(3, 1), int(body_id))
-        return np.asarray(Jr @ self._build_transform_qdot_to_qvel_fast(), dtype=float), rotation
+        _jacp, jacr, _position, rotation = mujoco_frame_jacobians(
+            self.robot_model,
+            self.robot_data,
+            self._frame_ref(frame_name),
+        )
+        return np.asarray(jacr @ self._build_transform_qdot_to_qvel_fast(), dtype=float), rotation
 
     def _axis_jacobian(self, start_frame: str, end_frame: str) -> tuple[np.ndarray, np.ndarray]:
         J_start, p_start = self._frame_position_jacobian(start_frame)
@@ -891,6 +893,44 @@ class InteractionMeshRetargeter:
         axis = delta / length
         projector = (np.eye(3) - np.outer(axis, axis)) / length
         return axis, projector @ (J_end - J_start)
+
+    def _body_fixed_axis_jacobian(
+        self,
+        frame_name: str,
+        local_axis: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Return a body-fixed world direction and its configuration Jacobian."""
+        local = np.asarray(local_axis, dtype=float).reshape(3)
+        length = float(np.linalg.norm(local))
+        if length < 1e-12:
+            raise ValueError(f"Body-fixed axis for '{frame_name}' must be nonzero")
+        local /= length
+        J_rot, rotation = self._frame_rotational_jacobian(frame_name)
+        axis = rotation @ local
+        skew_axis = np.array(
+            [
+                [0.0, -axis[2], axis[1]],
+                [axis[2], 0.0, -axis[0]],
+                [-axis[1], axis[0], 0.0],
+            ]
+        )
+        return axis, -skew_axis @ J_rot
+
+    def _target_axis_jacobian(
+        self,
+        orientation_targets: XsensOrientationTargets,
+        axis_idx: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        end_frame = orientation_targets.axis_robot_end_link_names[axis_idx]
+        if end_frame:
+            return self._axis_jacobian(
+                orientation_targets.axis_robot_start_link_names[axis_idx],
+                end_frame,
+            )
+        return self._body_fixed_axis_jacobian(
+            orientation_targets.axis_robot_start_link_names[axis_idx],
+            orientation_targets.axis_robot_local_vectors[axis_idx],
+        )
 
     def _orientation_tracking_objective_terms(
         self,
@@ -916,10 +956,7 @@ class InteractionMeshRetargeter:
 
         for axis_idx, axis_name in enumerate(orientation_targets.axis_names):
             del axis_name
-            current_axis, J_axis = self._axis_jacobian(
-                orientation_targets.axis_robot_start_link_names[axis_idx],
-                orientation_targets.axis_robot_end_link_names[axis_idx],
-            )
+            current_axis, J_axis = self._target_axis_jacobian(orientation_targets, axis_idx)
             target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
             J_active = J_axis[:, self.q_a_indices]
             weight = self.orientation_config.axis_weight * float(orientation_targets.axis_weights[axis_idx])
@@ -948,10 +985,7 @@ class InteractionMeshRetargeter:
 
         axis_errors = []
         for axis_idx in range(len(orientation_targets.axis_names)):
-            current_axis, _ = self._axis_jacobian(
-                orientation_targets.axis_robot_start_link_names[axis_idx],
-                orientation_targets.axis_robot_end_link_names[axis_idx],
-            )
+            current_axis, _ = self._target_axis_jacobian(orientation_targets, axis_idx)
             target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
             dot = float(np.clip(np.dot(current_axis, target_axis), -1.0, 1.0))
             axis_errors.append(float(np.degrees(np.arccos(dot))))

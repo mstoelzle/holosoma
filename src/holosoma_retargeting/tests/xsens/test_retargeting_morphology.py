@@ -94,6 +94,7 @@ def test_retargeting_summary_lists_active_objectives_and_rotation_offsets() -> N
         axis_xsens_segment_names=["Left Forearm"],
         axis_robot_start_link_names=["left_elbow_link"],
         axis_robot_end_link_names=["left_rubber_hand_link"],
+        axis_robot_local_vectors=np.zeros((1, 3), dtype=float),
         axis_target_vectors=np.array([[[1.0, 0.0, 0.0]]]),
         axis_weights=np.ones(1),
     )

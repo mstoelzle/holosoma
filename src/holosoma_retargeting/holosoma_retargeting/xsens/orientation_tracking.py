@@ -22,8 +22,15 @@ class XsensAxisSpec:
     xsens_axis_start: str
     xsens_axis_end: str
     robot_axis_start: str
-    robot_axis_end: str
+    robot_axis_end: str | None
     weight: float = 1.0
+    robot_local_axis: tuple[float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        has_end_frame = self.robot_axis_end is not None
+        has_local_axis = self.robot_local_axis is not None
+        if has_end_frame == has_local_axis:
+            raise ValueError("An axis spec must define exactly one robot end frame or body-fixed local axis")
 
 
 @dataclass(frozen=True)
@@ -38,6 +45,7 @@ class XsensOrientationTargets:
     axis_xsens_segment_names: list[str]
     axis_robot_start_link_names: list[str]
     axis_robot_end_link_names: list[str]
+    axis_robot_local_vectors: np.ndarray
     axis_target_vectors: np.ndarray
     axis_weights: np.ndarray
 
@@ -53,6 +61,7 @@ class XsensOrientationCalibration(Protocol):
     axis_local_tpose_xyz: np.ndarray
     axis_robot_start_link_names: list[str]
     axis_robot_end_link_names: list[str]
+    axis_robot_local_vectors: np.ndarray
     axis_weights: np.ndarray
 
 
@@ -160,7 +169,7 @@ XSENS_AXIS_SPECS = (
         "Left Lower Leg",
         "Left Foot",
         "left_knee_link",
-        "left_ankle_intermediate_1_link",
+        "left_ankle_pitch_link",
     ),
     XsensAxisSpec(
         "right_shank",
@@ -168,23 +177,25 @@ XSENS_AXIS_SPECS = (
         "Right Lower Leg",
         "Right Foot",
         "right_knee_link",
-        "right_ankle_intermediate_1_link",
+        "right_ankle_pitch_link",
     ),
     XsensAxisSpec(
         "left_foot_forward",
         "Left Foot",
         "Left Foot",
         "Left Toe",
-        "left_ankle_intermediate_1_link",
-        "left_ankle_roll_sphere_5_link",
+        "left_ankle_roll_link",
+        None,
+        robot_local_axis=(1.0, 0.0, 0.0),
     ),
     XsensAxisSpec(
         "right_foot_forward",
         "Right Foot",
         "Right Foot",
         "Right Toe",
-        "right_ankle_intermediate_1_link",
-        "right_ankle_roll_sphere_5_link",
+        "right_ankle_roll_link",
+        None,
+        robot_local_axis=(1.0, 0.0, 0.0),
     ),
 )
 
@@ -231,6 +242,7 @@ def build_xsens_axis_calibration_metadata(
     axis_segments = []
     axis_start_links = []
     axis_end_links = []
+    robot_local_vectors = []
     local_axes = []
     weights = []
 
@@ -242,7 +254,8 @@ def build_xsens_axis_calibration_metadata(
         axis_names.append(spec.name)
         axis_segments.append(spec.xsens_segment)
         axis_start_links.append(spec.robot_axis_start)
-        axis_end_links.append(spec.robot_axis_end)
+        axis_end_links.append(spec.robot_axis_end or "")
+        robot_local_vectors.append(spec.robot_local_axis or (0.0, 0.0, 0.0))
         local_axes.append(normalize_vector(local_axis, np.array([1.0, 0.0, 0.0])))
         weights.append(spec.weight)
 
@@ -252,6 +265,7 @@ def build_xsens_axis_calibration_metadata(
         "axis_local_tpose_xyz": np.asarray(local_axes, dtype=float),
         "axis_robot_start_link_names": np.asarray(axis_start_links, dtype=str),
         "axis_robot_end_link_names": np.asarray(axis_end_links, dtype=str),
+        "axis_robot_local_vectors": np.asarray(robot_local_vectors, dtype=float),
         "axis_weights": np.asarray(weights, dtype=float),
     }
 
@@ -266,6 +280,7 @@ def build_xsens_orientation_targets(
     axis_local_tpose_xyz: np.ndarray,
     axis_robot_start_link_names: list[str],
     axis_robot_end_link_names: list[str],
+    axis_robot_local_vectors: np.ndarray,
     axis_weights: np.ndarray,
     motion_quaternions_wijk: np.ndarray,
     segment_names: list[str],
@@ -298,6 +313,24 @@ def build_xsens_orientation_targets(
         orientation_targets[:, mapping_idx] = rotations[:, source_idx] @ offset_rotations[mapping_idx]
 
     axis_targets = np.zeros((motion_quaternions.shape[0], len(axis_names), 3), dtype=float)
+    robot_local_vectors = np.asarray(axis_robot_local_vectors, dtype=float).copy()
+    if robot_local_vectors.shape != (len(axis_names), 3):
+        raise ValueError(
+            f"axis_robot_local_vectors must have shape ({len(axis_names)}, 3), got {robot_local_vectors.shape}"
+        )
+    if len(axis_robot_start_link_names) != len(axis_names) or len(axis_robot_end_link_names) != len(axis_names):
+        raise ValueError("Calibration axis names, start frames, and end frames must have the same length")
+    for axis_idx, (end_frame, local_vector) in enumerate(
+        zip(axis_robot_end_link_names, robot_local_vectors, strict=True)
+    ):
+        has_end_frame = bool(end_frame)
+        has_local_axis = float(np.linalg.norm(local_vector)) > 1e-12
+        if has_end_frame == has_local_axis:
+            raise ValueError(
+                f"Axis '{axis_names[axis_idx]}' must define exactly one robot end frame or body-fixed local vector"
+            )
+        if has_local_axis:
+            robot_local_vectors[axis_idx] = normalize_vector(local_vector)
     for axis_idx, xsens_name in enumerate(axis_xsens_segment_names):
         if xsens_name not in segment_to_index:
             raise ValueError(f"Calibration axis-driving segment is not present in motion data: {xsens_name}")
@@ -315,6 +348,7 @@ def build_xsens_orientation_targets(
         axis_xsens_segment_names=axis_xsens_segment_names,
         axis_robot_start_link_names=axis_robot_start_link_names,
         axis_robot_end_link_names=axis_robot_end_link_names,
+        axis_robot_local_vectors=robot_local_vectors,
         axis_target_vectors=axis_targets,
         axis_weights=np.asarray(axis_weights, dtype=float),
     )
@@ -337,6 +371,7 @@ def build_xsens_orientation_targets_from_calibration(
         axis_local_tpose_xyz=calibration.axis_local_tpose_xyz,
         axis_robot_start_link_names=calibration.axis_robot_start_link_names,
         axis_robot_end_link_names=calibration.axis_robot_end_link_names,
+        axis_robot_local_vectors=calibration.axis_robot_local_vectors,
         axis_weights=calibration.axis_weights,
         motion_quaternions_wijk=motion_quaternions_wijk,
         segment_names=segment_names,
@@ -364,6 +399,7 @@ def load_xsens_orientation_targets(
             "axis_local_tpose_xyz",
             "axis_robot_start_link_names",
             "axis_robot_end_link_names",
+            "axis_robot_local_vectors",
             "axis_weights",
         )
         missing = [name for name in required if name not in data]
@@ -382,6 +418,7 @@ def load_xsens_orientation_targets(
             axis_local_tpose_xyz=np.asarray(data["axis_local_tpose_xyz"], dtype=float),
             axis_robot_start_link_names=[str(value) for value in data["axis_robot_start_link_names"]],
             axis_robot_end_link_names=[str(value) for value in data["axis_robot_end_link_names"]],
+            axis_robot_local_vectors=np.asarray(data["axis_robot_local_vectors"], dtype=float),
             axis_weights=np.asarray(data["axis_weights"], dtype=float),
             motion_quaternions_wijk=motion_quaternions_wijk,
             segment_names=segment_names,

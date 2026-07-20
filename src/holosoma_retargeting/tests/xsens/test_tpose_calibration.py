@@ -134,7 +134,11 @@ def test_axis_calibration_metadata_matches_tracking_matrix() -> None:
     assert metadata["axis_names"].tolist() == [spec.name for spec in XSENS_AXIS_SPECS]
     assert metadata["axis_xsens_segment_names"].tolist() == [spec.xsens_segment for spec in XSENS_AXIS_SPECS]
     assert metadata["axis_robot_start_link_names"].tolist() == [spec.robot_axis_start for spec in XSENS_AXIS_SPECS]
-    assert metadata["axis_robot_end_link_names"].tolist() == [spec.robot_axis_end for spec in XSENS_AXIS_SPECS]
+    assert metadata["axis_robot_end_link_names"].tolist() == [spec.robot_axis_end or "" for spec in XSENS_AXIS_SPECS]
+    np.testing.assert_allclose(
+        metadata["axis_robot_local_vectors"],
+        np.asarray([spec.robot_local_axis or (0.0, 0.0, 0.0) for spec in XSENS_AXIS_SPECS]),
+    )
     np.testing.assert_allclose(np.linalg.norm(metadata["axis_local_tpose_xyz"], axis=1), 1.0)
 
 
@@ -232,6 +236,29 @@ def test_orientation_tracking_jacobians_match_finite_difference() -> None:
     axis_eps, _ = retargeter._axis_jacobian("left_elbow_link", "left_rubber_hand_link")
     axis_fd = (axis_eps - axis) / eps
     np.testing.assert_allclose(J_axis[:, q_idx], axis_fd, atol=1e-4)
+
+    ankle_pitch_id = mujoco.mj_name2id(
+        retargeter.robot_model,
+        mujoco.mjtObj.mjOBJ_JOINT,
+        "left_ankle_pitch_joint",
+    )
+    ankle_pitch_q_idx = int(retargeter.robot_model.jnt_qposadr[ankle_pitch_id])
+    retargeter.robot_data.qpos[:] = q
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    body_axis, J_body_axis = retargeter._body_fixed_axis_jacobian(
+        "left_ankle_roll_link",
+        np.array([1.0, 0.0, 0.0]),
+    )
+    q_eps = q.copy()
+    q_eps[ankle_pitch_q_idx] += eps
+    retargeter.robot_data.qpos[:] = q_eps
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    body_axis_eps, _ = retargeter._body_fixed_axis_jacobian(
+        "left_ankle_roll_link",
+        np.array([1.0, 0.0, 0.0]),
+    )
+    body_axis_fd = (body_axis_eps - body_axis) / eps
+    np.testing.assert_allclose(J_body_axis[:, ankle_pitch_q_idx], body_axis_fd, atol=1e-4)
 
 
 def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:

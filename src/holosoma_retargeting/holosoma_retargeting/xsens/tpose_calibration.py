@@ -17,7 +17,12 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
-from holosoma_retargeting.src.mujoco_utils import mujoco_frame_pose
+from holosoma_retargeting.src.mujoco_utils import (
+    MujocoFrameRef,
+    mujoco_frame_pose,
+    resolve_mujoco_frame,
+    resolve_mujoco_frames,
+)
 from holosoma_retargeting.xsens.orientation_tracking import build_xsens_axis_calibration_metadata
 
 CALIBRATION_POSITION_MAPPING = {
@@ -36,34 +41,66 @@ CALIBRATION_POSITION_MAPPING = {
     "Right Upper Leg": "right_hip_pitch_link",
     "Left Lower Leg": "left_knee_link",
     "Right Lower Leg": "right_knee_link",
-    "Left Foot": "left_ankle_intermediate_1_link",
-    "Right Foot": "right_ankle_intermediate_1_link",
-    "Left Toe": "left_ankle_roll_sphere_5_link",
-    "Right Toe": "right_ankle_roll_sphere_5_link",
+    "Left Foot": "left_ankle_roll_link",
+    "Right Foot": "right_ankle_roll_link",
+    "Left Toe": "left_ankle_roll_metatarsal_site",
+    "Right Toe": "right_ankle_roll_metatarsal_site",
 }
 
 CANDIDATE_ORIENTATION_MAPPING = {
     "L5": "torso_link",
     "Head": "head_link",
-    "Left Foot": "left_ankle_intermediate_1_link",
-    "Right Foot": "right_ankle_intermediate_1_link",
+    "Left Foot": "left_ankle_roll_link",
+    "Right Foot": "right_ankle_roll_link",
     "Left Hand": "left_rubber_hand_link",
     "Right Hand": "right_rubber_hand_link",
 }
 
+@dataclass(frozen=True)
+class CalibrationAxisTarget:
+    """One T-pose direction target represented by two frames or a body-fixed axis."""
+
+    source_start: str
+    source_end: str
+    robot_start: str
+    robot_end: str | None
+    name: str
+    robot_local_axis: tuple[float, float, float] | None = None
+
+    def __post_init__(self) -> None:
+        has_end_frame = self.robot_end is not None
+        has_local_axis = self.robot_local_axis is not None
+        if has_end_frame == has_local_axis:
+            raise ValueError("A calibration axis must define exactly one robot end frame or body-fixed local axis")
+
+
 LIMB_AXIS_TARGETS = (
-    ("Left Upper Arm", "Left Forearm", "left_shoulder_roll_link", "left_elbow_link", "left_upper_arm"),
-    ("Right Upper Arm", "Right Forearm", "right_shoulder_roll_link", "right_elbow_link", "right_upper_arm"),
-    ("Left Forearm", "Left Hand", "left_elbow_link", "left_rubber_hand_link", "left_forearm"),
-    ("Right Forearm", "Right Hand", "right_elbow_link", "right_rubber_hand_link", "right_forearm"),
-    ("Left Upper Leg", "Left Lower Leg", "left_hip_pitch_link", "left_knee_link", "left_thigh"),
-    ("Right Upper Leg", "Right Lower Leg", "right_hip_pitch_link", "right_knee_link", "right_thigh"),
-    ("Left Lower Leg", "Left Foot", "left_knee_link", "left_ankle_intermediate_1_link", "left_shank"),
-    ("Right Lower Leg", "Right Foot", "right_knee_link", "right_ankle_intermediate_1_link", "right_shank"),
-    ("Left Foot", "Left Toe", "left_ankle_intermediate_1_link", "left_ankle_roll_sphere_5_link", "left_foot"),
-    ("Right Foot", "Right Toe", "right_ankle_intermediate_1_link", "right_ankle_roll_sphere_5_link", "right_foot"),
-    ("Pelvis", "L5", "pelvis_contour_link", "torso_link", "torso"),
-    ("L5", "Head", "torso_link", "head_link", "head"),
+    CalibrationAxisTarget(
+        "Left Upper Arm", "Left Forearm", "left_shoulder_roll_link", "left_elbow_link", "left_upper_arm"
+    ),
+    CalibrationAxisTarget(
+        "Right Upper Arm", "Right Forearm", "right_shoulder_roll_link", "right_elbow_link", "right_upper_arm"
+    ),
+    CalibrationAxisTarget("Left Forearm", "Left Hand", "left_elbow_link", "left_rubber_hand_link", "left_forearm"),
+    CalibrationAxisTarget(
+        "Right Forearm", "Right Hand", "right_elbow_link", "right_rubber_hand_link", "right_forearm"
+    ),
+    CalibrationAxisTarget(
+        "Left Upper Leg", "Left Lower Leg", "left_hip_pitch_link", "left_knee_link", "left_thigh"
+    ),
+    CalibrationAxisTarget(
+        "Right Upper Leg", "Right Lower Leg", "right_hip_pitch_link", "right_knee_link", "right_thigh"
+    ),
+    CalibrationAxisTarget("Left Lower Leg", "Left Foot", "left_knee_link", "left_ankle_pitch_link", "left_shank"),
+    CalibrationAxisTarget(
+        "Right Lower Leg", "Right Foot", "right_knee_link", "right_ankle_pitch_link", "right_shank"
+    ),
+    CalibrationAxisTarget("Left Foot", "Left Toe", "left_ankle_roll_link", None, "left_foot", (1.0, 0.0, 0.0)),
+    CalibrationAxisTarget(
+        "Right Foot", "Right Toe", "right_ankle_roll_link", None, "right_foot", (1.0, 0.0, 0.0)
+    ),
+    CalibrationAxisTarget("Pelvis", "L5", "pelvis_contour_link", "torso_link", "torso"),
+    CalibrationAxisTarget("L5", "Head", "torso_link", "head_link", "head"),
 )
 
 SYMMETRY_LINK_PAIRS = (
@@ -72,8 +109,8 @@ SYMMETRY_LINK_PAIRS = (
     ("left_rubber_hand_link", "right_rubber_hand_link", "hand"),
     ("left_hip_pitch_link", "right_hip_pitch_link", "hip"),
     ("left_knee_link", "right_knee_link", "knee"),
-    ("left_ankle_intermediate_1_link", "right_ankle_intermediate_1_link", "ankle"),
-    ("left_ankle_roll_sphere_5_link", "right_ankle_roll_sphere_5_link", "toe"),
+    ("left_ankle_pitch_link", "right_ankle_pitch_link", "ankle"),
+    ("left_ankle_roll_metatarsal_site", "right_ankle_roll_metatarsal_site", "toe"),
 )
 
 ARM_COLLINEARITY_TARGETS = (
@@ -177,6 +214,7 @@ class XsensTposeCalibrationResult:
     axis_local_tpose_xyz: np.ndarray
     axis_robot_start_link_names: list[str]
     axis_robot_end_link_names: list[str]
+    axis_robot_local_vectors: np.ndarray
     axis_weights: np.ndarray
     position_error_names: list[str]
     position_errors_m: np.ndarray
@@ -338,6 +376,14 @@ class _G1CalibrationProblem:
         self.joint_name_to_id = {model.joint(i).name: i for i in range(model.njnt) if model.joint(i).name}
         self.body_name_to_id = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i): i for i in range(model.nbody)}
         self.geom_name_to_id = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i): i for i in range(model.ngeom)}
+        frame_names = list(CALIBRATION_POSITION_MAPPING.values())
+        frame_names.extend(config.candidate_orientation_mapping.values())
+        for target in LIMB_AXIS_TARGETS:
+            frame_names.append(target.robot_start)
+            if target.robot_end is not None:
+                frame_names.append(target.robot_end)
+        frame_names.extend(frame for pair in SYMMETRY_LINK_PAIRS for frame in pair[:2])
+        self.frame_refs = resolve_mujoco_frames(model, frame_names)
         self.nominal_half_hip_width = self._compute_nominal_half_hip_width()
         self.straight_elbow_qpos = self._compute_straight_elbow_qpos()
         self.nominal_qpos = self._initial_qpos()
@@ -419,11 +465,29 @@ class _G1CalibrationProblem:
 
         return straight_qpos
 
+    def _frame_ref(self, frame_name: str) -> MujocoFrameRef:
+        if frame_name not in self.frame_refs:
+            self.frame_refs[frame_name] = resolve_mujoco_frame(self.model, frame_name)
+        return self.frame_refs[frame_name]
+
     def _frame_position(self, frame_name: str) -> np.ndarray:
-        return mujoco_frame_pose(self.model, self.data, frame_name)[0]
+        return mujoco_frame_pose(self.model, self.data, self._frame_ref(frame_name))[0]
 
     def _frame_rotation(self, frame_name: str) -> np.ndarray:
-        return mujoco_frame_pose(self.model, self.data, frame_name)[1]
+        return mujoco_frame_pose(self.model, self.data, self._frame_ref(frame_name))[1]
+
+    def _robot_axis(self, target: CalibrationAxisTarget, fallback: np.ndarray) -> np.ndarray:
+        if target.robot_end is not None:
+            return _normalize(
+                self._frame_position(target.robot_end) - self._frame_position(target.robot_start),
+                fallback,
+            )
+        if target.robot_local_axis is None:
+            raise ValueError(f"Body-fixed calibration axis '{target.name}' has no local vector")
+        return _normalize(
+            self._frame_rotation(target.robot_start) @ np.asarray(target.robot_local_axis, dtype=float),
+            fallback,
+        )
 
     def _initial_qpos(self) -> np.ndarray:
         qpos = np.zeros(self.model.nq, dtype=float)
@@ -547,12 +611,13 @@ class _G1CalibrationProblem:
             residuals.append(np.sqrt(self.config.leg_verticality_weight) * (full_leg_axis - down))
 
     def _append_axis_residuals(self, residuals: list[np.ndarray]) -> None:
-        for source_a, source_b, link_a, link_b, _name in LIMB_AXIS_TARGETS:
+        for target in LIMB_AXIS_TARGETS:
             target_axis = _normalize(
-                self.target_positions[_segment_index(source_b)] - self.target_positions[_segment_index(source_a)],
+                self.target_positions[_segment_index(target.source_end)]
+                - self.target_positions[_segment_index(target.source_start)],
                 np.array([1.0, 0.0, 0.0]),
             )
-            robot_axis = _normalize(self._frame_position(link_b) - self._frame_position(link_a), target_axis)
+            robot_axis = self._robot_axis(target, target_axis)
             residuals.append(np.sqrt(self.config.axis_weight) * (robot_axis - target_axis))
 
     def _append_arm_collinearity_residuals(self, residuals: list[np.ndarray]) -> None:
@@ -724,13 +789,14 @@ def _position_offsets(
 def _axis_errors(problem: _G1CalibrationProblem, qpos: np.ndarray) -> dict[str, float]:
     problem.set_qpos(qpos)
     errors = {}
-    for source_a, source_b, link_a, link_b, name in LIMB_AXIS_TARGETS:
-        errors[name] = limb_axis_error_deg(
-            problem.target_positions[_segment_index(source_a)],
-            problem.target_positions[_segment_index(source_b)],
-            problem._frame_position(link_a),
-            problem._frame_position(link_b),
+    for target in LIMB_AXIS_TARGETS:
+        target_axis = _normalize(
+            problem.target_positions[_segment_index(target.source_end)]
+            - problem.target_positions[_segment_index(target.source_start)],
+            np.array([1.0, 0.0, 0.0]),
         )
+        robot_axis = problem._robot_axis(target, target_axis)
+        errors[target.name] = float(np.degrees(np.arccos(np.clip(np.dot(robot_axis, target_axis), -1.0, 1.0))))
     return errors
 
 
@@ -873,6 +939,7 @@ def solve_xsens_tpose_calibration_from_data(
         axis_local_tpose_xyz=np.asarray(axis_metadata["axis_local_tpose_xyz"], dtype=float),
         axis_robot_start_link_names=[str(value) for value in axis_metadata["axis_robot_start_link_names"]],
         axis_robot_end_link_names=[str(value) for value in axis_metadata["axis_robot_end_link_names"]],
+        axis_robot_local_vectors=np.asarray(axis_metadata["axis_robot_local_vectors"], dtype=float),
         axis_weights=np.asarray(axis_metadata["axis_weights"], dtype=float),
         position_error_names=list(all_position_errors.keys()),
         position_errors_m=np.asarray(list(all_position_errors.values()), dtype=float),
@@ -907,6 +974,7 @@ def save_xsens_tpose_calibration(result: XsensTposeCalibrationResult, path: str 
         axis_local_tpose_xyz=result.axis_local_tpose_xyz,
         axis_robot_start_link_names=np.asarray(result.axis_robot_start_link_names, dtype=str),
         axis_robot_end_link_names=np.asarray(result.axis_robot_end_link_names, dtype=str),
+        axis_robot_local_vectors=result.axis_robot_local_vectors,
         axis_weights=result.axis_weights,
         position_error_names=np.asarray(result.position_error_names, dtype=str),
         position_errors_m=result.position_errors_m,
