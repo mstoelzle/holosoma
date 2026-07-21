@@ -114,13 +114,12 @@ XSENS_AXIS_SPECS = (
         "left_shoulder_pitch_link",
     ),
     XsensAxisSpec("torso_up", "L5", "Pelvis", "L5", "pelvis_contour_link", "torso_link"),
-    XsensAxisSpec("head_neck_up", "Head", "L5", "Head", "torso_link", "head_link"),
     XsensAxisSpec(
         "left_upper_arm",
         "Left Upper Arm",
         "Left Upper Arm",
         "Left Forearm",
-        "left_shoulder_roll_link",
+        "left_shoulder_yaw_link",
         "left_elbow_link",
     ),
     XsensAxisSpec(
@@ -128,7 +127,7 @@ XSENS_AXIS_SPECS = (
         "Right Upper Arm",
         "Right Upper Arm",
         "Right Forearm",
-        "right_shoulder_roll_link",
+        "right_shoulder_yaw_link",
         "right_elbow_link",
     ),
     XsensAxisSpec(
@@ -137,7 +136,7 @@ XSENS_AXIS_SPECS = (
         "Left Forearm",
         "Left Hand",
         "left_elbow_link",
-        "left_rubber_hand_link",
+        "left_wrist_yaw_link",
     ),
     XsensAxisSpec(
         "right_forearm",
@@ -145,8 +144,11 @@ XSENS_AXIS_SPECS = (
         "Right Forearm",
         "Right Hand",
         "right_elbow_link",
-        "right_rubber_hand_link",
+        "right_wrist_yaw_link",
     ),
+    # Upper Leg positions use the distal hip-yaw origins, but the direction
+    # spans the complete spatial hip cluster from hip pitch to knee. Starting
+    # at hip yaw over-rotates this target and regresses distal leg/foot fit.
     XsensAxisSpec(
         "left_thigh",
         "Left Upper Leg",

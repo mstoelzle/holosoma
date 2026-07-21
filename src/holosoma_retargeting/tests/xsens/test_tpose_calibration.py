@@ -280,7 +280,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
 
     assert result.qpos.shape == (1, 36)
     assert np.isfinite(result.qpos).all()
-    assert result.head_candidate_status.startswith(("accepted", "rejected"))
+    assert result.head_candidate_status == "not evaluated"
     assert result.axis_names == [spec.name for spec in XSENS_AXIS_SPECS]
     assert result.axis_local_tpose_xyz.shape == (len(XSENS_AXIS_SPECS), 3)
     assert result.position_offsets_robot_minus_xsens_m.shape == (len(CALIBRATION_POSITION_MAPPING), 3)

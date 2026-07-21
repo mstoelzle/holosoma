@@ -31,14 +31,14 @@ CALIBRATION_POSITION_MAPPING = {
     "Head": "head_link",
     "Left Shoulder": "left_shoulder_pitch_link",
     "Right Shoulder": "right_shoulder_pitch_link",
-    "Left Upper Arm": "left_shoulder_roll_link",
-    "Right Upper Arm": "right_shoulder_roll_link",
+    "Left Upper Arm": "left_shoulder_yaw_link",
+    "Right Upper Arm": "right_shoulder_yaw_link",
     "Left Forearm": "left_elbow_link",
     "Right Forearm": "right_elbow_link",
-    "Left Hand": "left_rubber_hand_link",
-    "Right Hand": "right_rubber_hand_link",
-    "Left Upper Leg": "left_hip_pitch_link",
-    "Right Upper Leg": "right_hip_pitch_link",
+    "Left Hand": "left_wrist_yaw_link",
+    "Right Hand": "right_wrist_yaw_link",
+    "Left Upper Leg": "left_hip_yaw_link",
+    "Right Upper Leg": "right_hip_yaw_link",
     "Left Lower Leg": "left_knee_link",
     "Right Lower Leg": "right_knee_link",
     "Left Foot": "left_ankle_roll_link",
@@ -49,7 +49,6 @@ CALIBRATION_POSITION_MAPPING = {
 
 CANDIDATE_ORIENTATION_MAPPING = {
     "L5": "torso_link",
-    "Head": "head_link",
     "Left Foot": "left_ankle_roll_link",
     "Right Foot": "right_ankle_roll_link",
     "Left Hand": "left_rubber_hand_link",
@@ -76,15 +75,17 @@ class CalibrationAxisTarget:
 
 LIMB_AXIS_TARGETS = (
     CalibrationAxisTarget(
-        "Left Upper Arm", "Left Forearm", "left_shoulder_roll_link", "left_elbow_link", "left_upper_arm"
+        "Left Upper Arm", "Left Forearm", "left_shoulder_yaw_link", "left_elbow_link", "left_upper_arm"
     ),
     CalibrationAxisTarget(
-        "Right Upper Arm", "Right Forearm", "right_shoulder_roll_link", "right_elbow_link", "right_upper_arm"
+        "Right Upper Arm", "Right Forearm", "right_shoulder_yaw_link", "right_elbow_link", "right_upper_arm"
     ),
-    CalibrationAxisTarget("Left Forearm", "Left Hand", "left_elbow_link", "left_rubber_hand_link", "left_forearm"),
+    CalibrationAxisTarget("Left Forearm", "Left Hand", "left_elbow_link", "left_wrist_yaw_link", "left_forearm"),
     CalibrationAxisTarget(
-        "Right Forearm", "Right Hand", "right_elbow_link", "right_rubber_hand_link", "right_forearm"
+        "Right Forearm", "Right Hand", "right_elbow_link", "right_wrist_yaw_link", "right_forearm"
     ),
+    # Match the runtime whole-hip direction; the Upper Leg point itself is
+    # calibrated against the distal hip-yaw origin above.
     CalibrationAxisTarget(
         "Left Upper Leg", "Left Lower Leg", "left_hip_pitch_link", "left_knee_link", "left_thigh"
     ),
@@ -100,14 +101,13 @@ LIMB_AXIS_TARGETS = (
         "Right Foot", "Right Toe", "right_ankle_roll_link", None, "right_foot", (1.0, 0.0, 0.0)
     ),
     CalibrationAxisTarget("Pelvis", "L5", "pelvis_contour_link", "torso_link", "torso"),
-    CalibrationAxisTarget("L5", "Head", "torso_link", "head_link", "head"),
 )
 
 SYMMETRY_LINK_PAIRS = (
-    ("left_shoulder_roll_link", "right_shoulder_roll_link", "shoulder"),
+    ("left_shoulder_yaw_link", "right_shoulder_yaw_link", "shoulder"),
     ("left_elbow_link", "right_elbow_link", "elbow"),
-    ("left_rubber_hand_link", "right_rubber_hand_link", "hand"),
-    ("left_hip_pitch_link", "right_hip_pitch_link", "hip"),
+    ("left_wrist_yaw_link", "right_wrist_yaw_link", "hand"),
+    ("left_hip_yaw_link", "right_hip_yaw_link", "hip"),
     ("left_knee_link", "right_knee_link", "knee"),
     ("left_ankle_pitch_link", "right_ankle_pitch_link", "ankle"),
     ("left_ankle_roll_metatarsal_site", "right_ankle_roll_metatarsal_site", "toe"),

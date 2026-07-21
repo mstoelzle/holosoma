@@ -108,8 +108,9 @@ these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.gr
 
 This default path also reconstructs the recording's T-pose with G1 proportions and uses those positions at scale
 `1.0` to solve the physical G1 orientation-calibration pose. The recorded global Xsens segment orientations are
-copied unchanged, then calibrated against the corresponding G1 link frames so torso, head, foot, and hand
-orientations can be tracked during optimization. Direct mode retains the previous human-height-scaled calibration.
+copied unchanged, then calibrated against the corresponding G1 link frames so torso, foot, and hand orientations
+can be tracked during optimization. The fixed G1 head does not track independent Xsens head/neck rotation; head
+position remains part of the interaction mesh. Direct mode retains the previous human-height-scaled calibration.
 Supply an existing artifact with `--retargeter.orientation.calibration-path <calibration.npz>` to skip the in-memory
 calibration, or use `--xsens-morphology.no-track-orientations` for the position-only optimizer.
 

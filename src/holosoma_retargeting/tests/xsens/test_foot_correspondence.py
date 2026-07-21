@@ -56,3 +56,46 @@ def test_runtime_and_calibration_use_matching_foot_axes() -> None:
         "right_ankle_roll_metatarsal_site",
         "toe",
     ) in SYMMETRY_LINK_PAIRS
+
+
+def test_runtime_and_calibration_use_distal_compound_joint_origins() -> None:
+    runtime_mapping = JOINTS_MAPPINGS[("xsens", "g1")]
+    expected_positions = {
+        "Left Upper Leg": "left_hip_yaw_link",
+        "Right Upper Leg": "right_hip_yaw_link",
+        "Left Upper Arm": "left_shoulder_yaw_link",
+        "Right Upper Arm": "right_shoulder_yaw_link",
+        "Left Hand": "left_wrist_yaw_link",
+        "Right Hand": "right_wrist_yaw_link",
+    }
+    expected_axes = {
+        "left_thigh": ("left_hip_pitch_link", "left_knee_link"),
+        "right_thigh": ("right_hip_pitch_link", "right_knee_link"),
+        "left_upper_arm": ("left_shoulder_yaw_link", "left_elbow_link"),
+        "right_upper_arm": ("right_shoulder_yaw_link", "right_elbow_link"),
+        "left_forearm": ("left_elbow_link", "left_wrist_yaw_link"),
+        "right_forearm": ("right_elbow_link", "right_wrist_yaw_link"),
+    }
+    runtime_axes = {
+        spec.name: (spec.robot_axis_start, spec.robot_axis_end)
+        for spec in XSENS_AXIS_SPECS
+        if spec.name in expected_axes
+    }
+    calibration_axes = {
+        target.name: (target.robot_start, target.robot_end)
+        for target in LIMB_AXIS_TARGETS
+    }
+
+    assert {name: runtime_mapping[name] for name in expected_positions} == expected_positions
+    assert {name: CALIBRATION_POSITION_MAPPING[name] for name in expected_positions} == expected_positions
+    assert runtime_axes == expected_axes
+    assert {name: calibration_axes[name] for name in expected_axes} == expected_axes
+    assert ("left_hip_yaw_link", "right_hip_yaw_link", "hip") in SYMMETRY_LINK_PAIRS
+    assert ("left_shoulder_yaw_link", "right_shoulder_yaw_link", "shoulder") in SYMMETRY_LINK_PAIRS
+    assert ("left_wrist_yaw_link", "right_wrist_yaw_link", "hand") in SYMMETRY_LINK_PAIRS
+
+
+def test_head_motion_is_not_applied_to_the_fixed_g1_head() -> None:
+    assert "Head" not in CANDIDATE_ORIENTATION_MAPPING
+    assert "head_neck_up" not in {spec.name for spec in XSENS_AXIS_SPECS}
+    assert "head" not in {target.name for target in LIMB_AXIS_TARGETS}

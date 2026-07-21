@@ -65,7 +65,7 @@ def test_motion_data_config_registers_xsens_for_g1() -> None:
     assert cfg.frame_start == 0
     assert cfg.max_frames is None
     assert cfg.resolved_joints_mapping["Pelvis"] == "pelvis_contour_link"
-    assert cfg.resolved_joints_mapping["Right Hand"] == "right_rubber_hand_link"
+    assert cfg.resolved_joints_mapping["Right Hand"] == "right_wrist_yaw_link"
 
 
 def test_loader_prefers_meter_stream_and_uses_headings_to_ignore_extra_segments(tmp_path) -> None:
