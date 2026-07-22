@@ -80,7 +80,7 @@ class RetargeterConfig:
     """Whether to enforce joint limits during retargeting."""
 
     activate_obj_non_penetration: bool = True
-    """Whether to enforce object non-penetration constraints."""
+    """Whether to enforce ground/object non-penetration constraints."""
 
     activate_foot_sticking: bool = True
     """Whether to enforce foot sticking constraints."""

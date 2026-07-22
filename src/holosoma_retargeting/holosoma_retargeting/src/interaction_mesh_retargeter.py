@@ -79,7 +79,7 @@ class InteractionMeshRetargeter:
         """This kinematic retargeter solves the diffIK problem with hard constraints in SQP style.
         During each SQP iteration, the problem is solved with the following constraints and costs:
             1. [Cost] Minimize the Laplacian deformation in the object frame.
-            2. [Constraint] Enforce the non-penetration constraints w/ the ground and (if activated) the object.
+            2. [Constraint] Enforce ground/object non-penetration constraints if activated.
             3. [Constraint] Enforce the foot sticking constraints if activated.
             4. [Constraint] Enforce the joint limits if activated.
             5. [Constraint] Enforce trust region of dq.
@@ -750,11 +750,7 @@ class InteractionMeshRetargeter:
 
         # Non-penetration constraints
         Js, phis = self._update_jacobians_and_phis_from_q(q)
-        for key, phi in phis.items():
-            Ja_n_full = Js[key]
-            Ja_n = Ja_n_full[self.q_a_indices]
-            rhs = -phi - self.penetration_tolerance
-            constraints += [Ja_n @ dqa >= rhs]
+        constraints += self._environment_non_penetration_constraints(dqa, Js, phis)
 
         # Self-collision constraints
         Js_sc, phis_sc = self._compute_self_collision_constraints(frame_idx)
@@ -827,6 +823,24 @@ class InteractionMeshRetargeter:
         q_star[3:7] /= np.linalg.norm(q_star[3:7]) + 1e-12
 
         return q_star, cost
+
+    def _environment_non_penetration_constraints(
+        self,
+        dqa: cp.Variable,
+        jacobians: dict[Any, np.ndarray],
+        signed_distances: dict[Any, float],
+    ) -> list[Any]:
+        """Build linearized ground/object constraints when they are enabled."""
+        if not self.activate_obj_non_penetration:
+            return []
+
+        constraints = []
+        for key, phi in signed_distances.items():
+            Ja_n_full = jacobians[key]
+            Ja_n = Ja_n_full[self.q_a_indices]
+            rhs = -phi - self.penetration_tolerance
+            constraints.append(Ja_n @ dqa >= rhs)
+        return constraints
 
     def _is_foot_locked_in_window(self, foot_link_key: str, frame_idx: int) -> bool:
         """Check whether a foot link is locked by configured frame windows."""
