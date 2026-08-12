@@ -10,7 +10,7 @@ from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.retargeter import RetargeterConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.task import TaskConfig
-from holosoma_retargeting.xsens.morphology_adaptation import XsensGroundingMode
+from holosoma_retargeting.xsens.morphology_adaptation import XsensGroundingMode, XsensRootMotionConfig
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,9 @@ class XsensMorphologyConfig:
 
     grounding: XsensGroundingMode = "match_lowest_soles"
     """How to align the G1-proportioned avatar vertically with the subject."""
+
+    root_motion: XsensRootMotionConfig = field(default_factory=XsensRootMotionConfig)
+    """How to transfer the source floating-base translation to G1 proportions."""
 
     preserve_joint_offsets: bool = False
     """Retain translations between the axes of G1 compound joints."""

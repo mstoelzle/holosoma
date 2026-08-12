@@ -106,6 +106,54 @@ The G1-proportioned mode defaults to collapsed compound-joint offsets and dynami
 these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.grounding none`; use
 `--xsens-morphology.g1-model-path <model.xml>` to measure proportions from a non-default G1 MuJoCo model.
 
+### Configure floating-base translation
+
+G1-proportioned Xsens transfer supports three root-motion modes through
+`--xsens-morphology.root-motion.mode`:
+
+- `preserve_world` (default) retains the existing world-space trajectory.
+- `scale_by_leg_length` scales root XY displacement using the G1/human leg-length ratio.
+- `scale_by_leg_length_contact_aware` applies the same scaling and removes horizontal drift while an outsole is
+  detected near the ground and moving slowly.
+
+The modes compose with the existing vertical `grounding` policy:
+
+| Root-motion mode | `match_lowest_soles` | `none` |
+|---|---|---|
+| `preserve_world` | Match the source lowest-outsole world height. | Copy source root XYZ. |
+| `scale_by_leg_length` | Scale root XY displacement and outsole height above ground. | Scale root XY displacement and root Z above ground. |
+| `scale_by_leg_length_contact_aware` | Use the preceding scaled baseline plus horizontal contact correction. | Scale root XYZ plus horizontal contact correction. |
+
+Horizontal displacement is anchored at the first source root position. Leg length is the mean neutral-pose
+hip-to-lowest-outsole vertical distance across both sides. When no ground override is supplied, ground Z is estimated
+robustly from the lowest source outsole samples. Root and segment orientations, timestamps, and frame count are never
+changed.
+
+```bash
+# Geometric root scaling with outsole-relative vertical motion
+python examples/robot_retarget.py \
+    --data_path demo_data/xsens_tennis \
+    --task-type robot_only \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_01 \
+    --data_format xsens \
+    --xsens-morphology.root-motion.mode scale_by_leg_length
+
+# Contact-aware scaling with direct root-Z scaling about an explicit ground
+python examples/robot_retarget.py \
+    --data_path demo_data/xsens_tennis \
+    --task-type robot_only \
+    --task-name 2026-06-14_tennis_S02_xsens_myo_data_01 \
+    --data_format xsens \
+    --xsens-morphology.root-motion.mode scale_by_leg_length_contact_aware \
+    --xsens-morphology.root-motion.ground-height-m 0.0 \
+    --xsens-morphology.grounding none
+```
+
+Contact-aware thresholds can be tuned with `contact-height-tolerance-m`, `contact-speed-threshold-m-s`,
+`contact-min-duration-s`, and `contact-max-gap-s` under the same `root-motion` prefix. Non-default root-motion modes
+are intentionally rejected with `--xsens-morphology.mode direct` because direct mode does not build the two calibrated
+morphologies needed to measure the leg-length ratio.
+
 This default path also reconstructs the recording's T-pose with G1 proportions and uses those positions at scale
 `1.0` to solve the physical G1 orientation-calibration pose. The recorded global Xsens segment orientations are
 copied unchanged, then calibrated against the corresponding G1 link frames so torso, foot, and hand orientations

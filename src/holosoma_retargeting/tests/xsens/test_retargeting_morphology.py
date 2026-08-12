@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import tyro
 from holosoma_retargeting.config_types.retargeter import OrientationTrackingConfig, RetargeterConfig
-from holosoma_retargeting.config_types.retargeting import XsensMorphologyConfig
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig, XsensMorphologyConfig
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.data_utils.xsens_hdf5 import (
     XSENS_BODY_SEGMENT_NAMES,
@@ -17,6 +18,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
 )
 from holosoma_retargeting.examples import robot_retarget
 from holosoma_retargeting.kinematics import KinematicMotion
+from holosoma_retargeting.xsens.morphology_adaptation import XsensRootMotionConfig
 from holosoma_retargeting.xsens.orientation_tracking import XsensOrientationTargets
 
 
@@ -40,6 +42,8 @@ def test_xsens_morphology_defaults_to_g1_proportioned_dynamic_grounding() -> Non
 
     assert config.mode == "g1_proportioned"
     assert config.grounding == "match_lowest_soles"
+    assert config.root_motion.mode == "preserve_world"
+    assert config.root_motion.ground_height_m is None
     assert config.preserve_joint_offsets is False
     assert config.g1_model_path is None
     assert config.track_orientations is True
@@ -173,6 +177,7 @@ def test_g1_mode_uses_robot_xml_and_disables_uniform_rescaling(monkeypatch) -> N
     assert scale == 1.0
     assert captured["g1_model_path"] == Path("models/g1/custom.xml")
     assert captured["grounding"] == "match_lowest_soles"
+    assert captured["root_motion"] == XsensMorphologyConfig().root_motion
 
 
 def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(monkeypatch) -> None:
@@ -290,3 +295,34 @@ def test_g1_mode_rejects_unsupported_task_or_robot() -> None:
         robot="t1",
         config=XsensMorphologyConfig(mode="direct"),
     )
+
+
+def test_direct_mode_rejects_scaled_root_motion() -> None:
+    with pytest.raises(ValueError, match="g1_proportioned"):
+        robot_retarget.validate_xsens_morphology_selection(
+            task_type="robot_only",
+            data_format="xsens",
+            robot="g1",
+            config=XsensMorphologyConfig(
+                mode="direct",
+                root_motion=XsensRootMotionConfig(mode="scale_by_leg_length"),
+            ),
+        )
+
+
+def test_tyro_parses_nested_root_motion_configuration() -> None:
+    config = tyro.cli(
+        RetargetingConfig,
+        args=[
+            "--xsens-morphology.root-motion.mode",
+            "scale_by_leg_length_contact_aware",
+            "--xsens-morphology.root-motion.ground-height-m",
+            "0.12",
+            "--xsens-morphology.root-motion.contact-height-tolerance-m",
+            "0.04",
+        ],
+    )
+
+    assert config.xsens_morphology.root_motion.mode == "scale_by_leg_length_contact_aware"
+    assert config.xsens_morphology.root_motion.ground_height_m == pytest.approx(0.12)
+    assert config.xsens_morphology.root_motion.contact_height_tolerance_m == pytest.approx(0.04)

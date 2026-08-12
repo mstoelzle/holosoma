@@ -43,7 +43,9 @@ class _SurfaceMesh:
     vertices_m: np.ndarray
 
 
-class _SurfaceHeightEvaluator:
+class SurfacePoseEvaluator:
+    """Evaluate selected model surfaces in the coordinates of a named pose."""
+
     def __init__(
         self,
         model: KinematicTree,
@@ -91,6 +93,26 @@ class _SurfaceHeightEvaluator:
                 minimum_z = min(minimum_z, float(position[2] + rotate_vector(orientation, vertex_m)[2]))
         return float(minimum_z)
 
+    def support_reference_m(self, pose: KinematicPose) -> np.ndarray:
+        """Return a stable surface-center XY position and the lowest surface Z."""
+
+        _validate_pose(pose, expected_body_names=self._body_names)
+        world_vertices: list[np.ndarray] = []
+        for surface_mesh in self._meshes:
+            position = pose.positions_m[surface_mesh.pose_index]
+            orientation = pose.orientations_wxyz[surface_mesh.pose_index]
+            world_vertices.extend(
+                position + rotate_vector(orientation, vertex_m) for vertex_m in surface_mesh.vertices_m
+            )
+        vertices = np.asarray(world_vertices, dtype=float)
+        return np.array(
+            [
+                float(np.mean(vertices[:, 0])),
+                float(np.mean(vertices[:, 1])),
+                float(np.min(vertices[:, 2])),
+            ]
+        )
+
 
 class LowestSurfaceGrounding:
     """Align selected target surfaces with selected source surfaces."""
@@ -110,13 +132,13 @@ class LowestSurfaceGrounding:
         validate_kinematic_tree(target_model).raise_if_invalid()
         body_names = tuple(pose_body_names)
         self.body_names = body_names
-        self._source = _SurfaceHeightEvaluator(
+        self._source = SurfacePoseEvaluator(
             source_model,
             body_names,
             source_body_to_pose_body,
             source_surfaces,
         )
-        self._target = _SurfaceHeightEvaluator(
+        self._target = SurfacePoseEvaluator(
             target_model,
             body_names,
             target_body_to_pose_body,
@@ -259,7 +281,7 @@ def reference_root_floor_clearance_m(model: KinematicTree) -> float:
     if not surfaces:
         raise ValueError("Cannot compute visual floor clearance for a model without meshes")
     mapping = {body_name: body_name for body_name in body_names}
-    evaluator = _SurfaceHeightEvaluator(model, body_names, mapping, surfaces)
+    evaluator = SurfacePoseEvaluator(model, body_names, mapping, surfaces)
     reference_pose = KinematicPose(
         body_names,
         np.array([body.reference_pose.translation_m for body in model.bodies]),

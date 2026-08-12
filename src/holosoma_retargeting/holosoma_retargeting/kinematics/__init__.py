@@ -19,6 +19,7 @@ from .morphology import (
     KinematicMotion,
     KinematicPose,
     LowestSurfaceGrounding,
+    SurfacePoseEvaluator,
     reference_grounding_offset_m,
     reference_root_floor_clearance_m,
 )
@@ -34,6 +35,7 @@ __all__ = [
     "PointSetAttachment",
     "RigidBodyDefinition",
     "SphericalJointDefinition",
+    "SurfacePoseEvaluator",
     "Transform",
     "ValidationReport",
     "compute_joint_positions",

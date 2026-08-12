@@ -195,7 +195,13 @@ def validate_xsens_morphology_selection(
 ) -> None:
     """Fail early when G1 morphology adaptation is selected outside its contract."""
 
-    if data_format != "xsens" or config.mode == "direct":
+    if data_format != "xsens":
+        return
+    if config.mode == "direct":
+        if config.root_motion.mode != "preserve_world":
+            raise ValueError(
+                "Non-default Xsens root-motion modes require xsens_morphology.mode='g1_proportioned'"
+            )
         return
     if task_type != "robot_only" or robot != "g1":
         raise ValueError(
@@ -233,10 +239,13 @@ def prepare_xsens_motion_for_retargeting(
         hdf5_path=hdf5_path,
         g1_model_path=g1_model_path,
         grounding=morphology_config.grounding,
+        root_motion=morphology_config.root_motion,
         preserve_joint_offsets=morphology_config.preserve_joint_offsets,
     )
     logger.info(
-        "Adapted Xsens motion to G1 proportions (grounding=%s, preserve_joint_offsets=%s)",
+        "Adapted Xsens motion to G1 proportions "
+        "(root_motion=%s, grounding=%s, preserve_joint_offsets=%s)",
+        morphology_config.root_motion.mode,
         morphology_config.grounding,
         morphology_config.preserve_joint_offsets,
     )
