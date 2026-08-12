@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
@@ -405,10 +406,19 @@ class MotionDataConfig:
     robot_defaults: dict[str, RobotDefaults] = field(default_factory=_default_robot_defaults)
 
     def __post_init__(self) -> None:
-        """Validate data_format and robot_type."""
+        """Validate format, robot, and motion-selection settings."""
         _validate_data_format(self.data_format)
 
         _validate_robot_type(self.robot_type, self.robot_defaults)
+
+        if self.target_fps is not None and (not math.isfinite(self.target_fps) or self.target_fps <= 0):
+            raise ValueError("target_fps must be finite and positive")
+        if self.frame_start < 0:
+            raise ValueError("frame_start must be non-negative")
+        if self.max_frames is not None and self.max_frames <= 0:
+            raise ValueError("max_frames must be positive")
+        if self.frame_indices is not None and (self.frame_start != 0 or self.max_frames is not None):
+            raise ValueError("frame_indices is mutually exclusive with frame_start and max_frames")
 
     # Optional overrides - if None, will use defaults from data_format
     demo_joints: list[str] | None = None
