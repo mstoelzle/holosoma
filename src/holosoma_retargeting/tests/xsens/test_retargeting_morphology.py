@@ -42,7 +42,7 @@ def test_xsens_morphology_defaults_to_g1_proportioned_dynamic_grounding() -> Non
 
     assert config.mode == "g1_proportioned"
     assert config.grounding == "match_lowest_soles"
-    assert config.root_motion.mode == "preserve_world"
+    assert config.root_motion.mode == "scale_by_leg_length"
     assert config.root_motion.ground_height_m is None
     assert config.preserve_joint_offsets is False
     assert config.g1_model_path is None
@@ -293,7 +293,10 @@ def test_g1_mode_rejects_unsupported_task_or_robot() -> None:
         task_type="robot_only",
         data_format="xsens",
         robot="t1",
-        config=XsensMorphologyConfig(mode="direct"),
+        config=XsensMorphologyConfig(
+            mode="direct",
+            root_motion=XsensRootMotionConfig(mode="preserve_world"),
+        ),
     )
 
 

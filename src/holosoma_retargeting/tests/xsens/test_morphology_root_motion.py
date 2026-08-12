@@ -133,7 +133,7 @@ def test_preserve_world_reproduces_legacy_root_mapping(grounding: str) -> None:
         source_model=source_model,
         target_model=target_model,
         grounding=grounding,
-        config=XsensRootMotionConfig(ground_height_m=0.0),
+        config=XsensRootMotionConfig(mode="preserve_world", ground_height_m=0.0),
     )
 
     pelvis = BODY_NAMES.index("Pelvis")

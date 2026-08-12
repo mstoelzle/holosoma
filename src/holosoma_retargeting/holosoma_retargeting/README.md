@@ -99,7 +99,8 @@ python examples/robot_retarget.py \
     --task-type robot_only \
     --task-name 2026-06-14_tennis_S02_xsens_myo_data_01 \
     --data_format xsens \
-    --xsens-morphology.mode direct
+    --xsens-morphology.mode direct \
+    --xsens-morphology.root-motion.mode preserve_world
 ```
 
 The G1-proportioned mode defaults to collapsed compound-joint offsets and dynamic lowest-sole grounding. Override
@@ -111,8 +112,8 @@ these with `--xsens-morphology.preserve-joint-offsets` or `--xsens-morphology.gr
 G1-proportioned Xsens transfer supports three root-motion modes through
 `--xsens-morphology.root-motion.mode`:
 
-- `preserve_world` (default) retains the existing world-space trajectory.
-- `scale_by_leg_length` scales root XY displacement using the G1/human leg-length ratio.
+- `preserve_world` retains the existing world-space trajectory.
+- `scale_by_leg_length` (default) scales root XY displacement using the G1/human leg-length ratio.
 - `scale_by_leg_length_contact_aware` applies the same scaling and removes horizontal drift while an outsole is
   detected near the ground and moving slowly.
 
@@ -242,6 +243,11 @@ for example, `--actor-modes xsens g1_xsens` renders both avatar proportions from
 `--actor-modes robot xsens` adds the physical G1. The `--actor-modes all` alias expands to `robot xsens g1_xsens`.
 Any selection containing `xsens` or `g1_xsens` requires `--xsens-hdf5`; a selection containing `robot` also reads
 `--qpos-npz`. When data sources are combined, the Xsens timestamps are the master clock.
+
+The G1-proportioned actor uses `scale_by_leg_length` root motion by default. Select the legacy trajectory with
+`--g1-xsens-root-motion.mode preserve_world`, or use
+`--g1-xsens-root-motion.mode scale_by_leg_length_contact_aware` for the contact-corrected variant. All viewer
+variants use lowest-sole grounding.
 
 The active actors are placed on a centered lateral line by default, matching the T-pose comparison layout. Their
 order is human-subject Xsens, G1-proportioned Xsens, then physical G1, with `2.0` metres of center-to-center spacing.

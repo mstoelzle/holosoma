@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
+
+from holosoma_retargeting.xsens.morphology_adaptation import XsensRootMotionConfig
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,9 @@ class XsensViserConfig(ViserConfig):
 
     g1_xsens_usd: str | None = None
     """G1-proportioned Xsens USDA override; defaults to the packaged demo result."""
+
+    g1_xsens_root_motion: XsensRootMotionConfig = field(default_factory=XsensRootMotionConfig)
+    """Floating-base translation policy for the G1-proportioned Xsens actor."""
 
     actor_spacing_m: float = 2.0
     """Lateral center-to-center spacing for the centered side-by-side actor layout."""

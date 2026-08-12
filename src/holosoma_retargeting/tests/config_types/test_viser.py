@@ -119,6 +119,7 @@ def test_xsens_options_are_not_part_of_global_viser_config() -> None:
     assert xsens.xsens_hdf5 == "motion.hdf5"
     assert xsens.actor_spacing_m == 2.0
     assert xsens.show_tennis_racket is True
+    assert xsens.g1_xsens_root_motion.mode == "scale_by_leg_length"
     assert isinstance(get_default_xsens_viser_config(), XsensViserConfig)
 
 

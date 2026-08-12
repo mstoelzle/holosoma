@@ -24,7 +24,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
     XsensHdf5Motion,
     load_xsens_hdf5_motion,
 )
-from holosoma_retargeting.kinematics import KinematicMorphologyAdapter, KinematicPose  # noqa: E402
+from holosoma_retargeting.kinematics import KinematicMorphologyAdapter, KinematicMotion  # noqa: E402
 from holosoma_retargeting.src.recording_utils import (  # noqa: E402
     build_record_frame_indices,
     record_viser_sequence,
@@ -34,6 +34,7 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
     QposViserApplier,
     create_motion_control_sliders,
     create_timed_motion_control_sliders,
+    interpolation_window,
     sample_qpos_at_time,
 )
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
@@ -48,6 +49,7 @@ from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
 )
 from holosoma_retargeting.xsens.kinematic_model import TENNIS_RACKET_BODY  # noqa: E402
 from holosoma_retargeting.xsens.morphology_adaptation import (  # noqa: E402
+    apply_xsens_root_motion,
     build_subject_xsens_reference_model,
     build_xsens_morphology_adapter,
 )
@@ -408,6 +410,7 @@ def make_player(
     xsens_actors: dict[ActorMode, XsensUsdActor] = {}
     xsens_sampler: XsensMotionSampler | None = None
     g1_xsens_adapter: KinematicMorphologyAdapter | None = None
+    g1_xsens_motion: KinematicMotion | None = None
     subject_reference_model = None
     if show_xsens:
         assert xsens_config is not None and xsens_motion is not None and xsens_config.xsens_hdf5 is not None
@@ -444,8 +447,21 @@ def make_player(
             g1_xsens_adapter = build_xsens_morphology_adapter(
                 g1_model,
                 xsens_sampler.segment_names,
+                grounding="none",
+            )
+            source_motion = KinematicMotion(
+                xsens_sampler.segment_names,
+                np.asarray(xsens_motion.positions_m, dtype=float),
+                np.asarray(xsens_motion.quaternions_wijk, dtype=float),
+                xsens_sampler.times_s.copy(),
+            )
+            g1_xsens_motion, root_motion_report = apply_xsens_root_motion(
+                source_motion,
+                g1_xsens_adapter.adapt_motion(source_motion),
                 source_model=subject_reference_model,
+                target_model=g1_model,
                 grounding="match_lowest_soles",
+                config=xsens_config.g1_xsens_root_motion,
             )
         for mode, actor in xsens_actors.items():
             actor.root.position = xsens_actor_offsets[mode]
@@ -488,7 +504,11 @@ def make_player(
     for mode, offset in actor_offsets.items():
         print(f"[viser_player] {mode} root offset=({offset[0]:.3f}, {offset[1]:.3f}, {offset[2]:.3f}) m")
     if "g1_xsens" in xsens_actors:
-        print("[viser_player] g1_xsens grounding=dynamic lowest-sole matching")
+        print(
+            "[viser_player] g1_xsens "
+            f"root_motion={root_motion_report.mode}, grounding=match_lowest_soles, "
+            f"scale={root_motion_report.scale:.5f}, ground={root_motion_report.ground_height_m:.4f} m"
+        )
 
     initial_base_positions: list[np.ndarray] = []
     initial_base_orientations: list[np.ndarray] = []
@@ -501,14 +521,8 @@ def make_player(
         initial_xsens_pose = xsens_sampler.sample(float(xsens_sampler.times_s[0]))
         initial_g1_positions = None
         if "g1_xsens" in xsens_actors:
-            assert g1_xsens_adapter is not None
-            initial_g1_positions = g1_xsens_adapter.adapt_pose(
-                KinematicPose(
-                    xsens_sampler.segment_names,
-                    initial_xsens_pose.positions_m,
-                    initial_xsens_pose.quaternions_wxyz,
-                )
-            ).positions_m
+            assert g1_xsens_motion is not None
+            initial_g1_positions = g1_xsens_motion.positions_m[0]
         for mode in xsens_actors:
             base_positions = (
                 initial_g1_positions
@@ -646,15 +660,12 @@ def make_player(
         xsens_pose = xsens_sampler.sample(time_s)
         g1_positions = None
         if "g1_xsens" in xsens_actors:
-            assert g1_xsens_adapter is not None
-            g1_pose = g1_xsens_adapter.adapt_pose(
-                KinematicPose(
-                    xsens_sampler.segment_names,
-                    xsens_pose.positions_m,
-                    xsens_pose.quaternions_wxyz,
-                )
+            assert g1_xsens_motion is not None
+            lower, upper, weight = interpolation_window(g1_xsens_motion.times_s, time_s)
+            g1_positions = (
+                (1.0 - weight) * g1_xsens_motion.positions_m[lower]
+                + weight * g1_xsens_motion.positions_m[upper]
             )
-            g1_positions = g1_pose.positions_m
 
         avatar_positions: list[np.ndarray] = []
         for mode, actor in xsens_actors.items():

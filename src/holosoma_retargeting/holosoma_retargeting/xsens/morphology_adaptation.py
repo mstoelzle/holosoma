@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 class XsensRootMotionConfig:
     """Configure floating-base translation during Xsens morphology transfer."""
 
-    mode: XsensRootMotionMode = "preserve_world"
+    mode: XsensRootMotionMode = "scale_by_leg_length"
     ground_height_m: float | None = None
     contact_height_tolerance_m: float = 0.03
     contact_speed_threshold_m_s: float = 0.3
