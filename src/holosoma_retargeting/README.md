@@ -513,7 +513,7 @@ python data_conversion/convert_data_format_mj.py --input_file OmniRetarget/robot
 ```
 
 ## Custom Human Motion Data Format
-Please see the instructions for custom human motion data formats: [ADD_MOTION_FORMAT_README.md](ADD_MOTION_FORMAT_README.md)
+Please see the instructions for custom human motion data formats: [ADD_MOTION_FORMAT_README.md](holosoma_retargeting/ADD_MOTION_FORMAT_README.md)
 
 ## Custom Robot Type
-Please see the instructions for retargeting custom robot types: [ADD_ROBOT_TYPE_README.md](ADD_ROBOT_TYPE_README.md)
+Please see the instructions for retargeting custom robot types: [ADD_ROBOT_TYPE_README.md](holosoma_retargeting/ADD_ROBOT_TYPE_README.md)
