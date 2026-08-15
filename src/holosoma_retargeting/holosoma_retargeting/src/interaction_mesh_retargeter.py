@@ -704,8 +704,8 @@ class InteractionMeshRetargeter:
             obj_original: the original object pose (used for contact matching).
             init_t: the current time step is the first time step.
             frame_idx: frame index used by explicit foot lock window constraints.
-            limb_orientation_stage: omit positional and full-orientation terms while
-                retaining segment-axis, temporal, neutral-pose, and hard constraints.
+            limb_orientation_stage: omit positional terms while retaining full
+                orientation, segment-axis, temporal, neutral-pose, and hard constraints.
         """
         assert len(q_a_n_last) == self.nq_a
 
@@ -852,7 +852,6 @@ class InteractionMeshRetargeter:
                     dqa,
                     orientation_targets,
                     frame_idx,
-                    include_full_orientation=not limb_orientation_stage,
                 )
             )
 
@@ -1009,24 +1008,21 @@ class InteractionMeshRetargeter:
         dqa: cp.Variable,
         orientation_targets: XsensOrientationTargets,
         frame_idx: int,
-        *,
-        include_full_orientation: bool = True,
     ) -> list[Any]:
         self.robot_data.qpos[:] = q
         mujoco.mj_forward(self.robot_model, self.robot_data)
         terms: list[Any] = []
 
-        if include_full_orientation:
-            for target_idx, link_name in enumerate(orientation_targets.orientation_robot_link_names):
-                target_rotation = orientation_targets.orientation_target_rotations[frame_idx, target_idx]
-                J_rot, current_rotation = self._frame_rotational_jacobian(link_name)
-                rotvec = Rotation.from_matrix(target_rotation @ current_rotation.T).as_rotvec()
-                rotvec = self._clip_rotvec(rotvec)
-                J_active = J_rot[:, self.q_a_indices]
-                terms.append(
-                    self.orientation_config.orientation_weight
-                    * cp.sum_squares(cp.Constant(J_active) @ dqa - cp.Constant(rotvec))
-                )
+        for target_idx, link_name in enumerate(orientation_targets.orientation_robot_link_names):
+            target_rotation = orientation_targets.orientation_target_rotations[frame_idx, target_idx]
+            J_rot, current_rotation = self._frame_rotational_jacobian(link_name)
+            rotvec = Rotation.from_matrix(target_rotation @ current_rotation.T).as_rotvec()
+            rotvec = self._clip_rotvec(rotvec)
+            J_active = J_rot[:, self.q_a_indices]
+            terms.append(
+                self.orientation_config.orientation_weight
+                * cp.sum_squares(cp.Constant(J_active) @ dqa - cp.Constant(rotvec))
+            )
 
         for axis_idx, axis_name in enumerate(orientation_targets.axis_names):
             del axis_name

@@ -69,17 +69,19 @@ class OrientationTrackingConfig:
 
 @dataclass(frozen=True)
 class StagedOptimizationConfig:
-    """Configuration for a minimal limb-orientation-first solve.
+    """Configuration for a minimal orientation-first solve.
 
-    The first stage keeps the segment-axis and smoothness objectives, drops
-    positional and full-orientation objectives, and temporarily attracts every
-    actuated joint toward the model-neutral pose. The unchanged full objective is
-    then solved for at least the same number of iterations, so the temporary prior
-    cannot keep a legitimate final pose away from a joint limit.
+    The first stage keeps the segment-axis, full-orientation, and smoothness
+    objectives, drops only positional objectives, and temporarily attracts every
+    actuated joint toward the model-neutral pose. Keeping full orientations removes
+    the three-dimensional right-arm null space left by upper-arm and forearm axes
+    alone. The neutral continuation remains necessary to leave the saturated bad
+    basin; the unchanged full objective is then solved for at least the same number
+    of iterations.
     """
 
     enable: bool = False
-    """Whether to use the limb-orientation-first schedule on every frame."""
+    """Whether to use the orientation-first schedule on every frame."""
 
     iterations: int = 20
     """SQP iterations in stage one and the minimum stage-two iteration budget."""
