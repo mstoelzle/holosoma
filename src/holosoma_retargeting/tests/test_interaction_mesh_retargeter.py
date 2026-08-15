@@ -5,7 +5,7 @@ from __future__ import annotations
 import cvxpy as cp
 import numpy as np
 import pytest
-from holosoma_retargeting.config_types.retargeter import FootLockConfig
+from holosoma_retargeting.config_types.retargeter import FootLockConfig, StagedOptimizationConfig
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 
 
@@ -59,3 +59,24 @@ def test_foot_lock_windows_return_per_window_floor_height() -> None:
     assert retargeter._is_foot_locked_in_window("right_ankle_link", 20) == pytest.approx(0.56)
     assert retargeter._is_foot_locked_in_window("left_ankle_link", 25) is None
     assert retargeter._is_foot_locked_in_window("torso_link", 15) is None
+
+
+def test_staged_optimization_defaults_to_minimal_disabled_schedule() -> None:
+    config = StagedOptimizationConfig()
+
+    assert config.enable is False
+    assert config.iterations == 20
+    assert config.neutral_weight == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"iterations": 0}, "iterations"),
+        ({"neutral_weight": 0.0}, "neutral_weight"),
+        ({"neutral_weight": np.inf}, "neutral_weight"),
+    ],
+)
+def test_staged_optimization_rejects_invalid_parameters(kwargs: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        StagedOptimizationConfig(**kwargs)

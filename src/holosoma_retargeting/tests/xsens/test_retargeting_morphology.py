@@ -85,6 +85,7 @@ def _retargeter_summary_stub():
         _self_collision_config=SimpleNamespace(enable=False),
         step_size=0.2,
         orientation_config=RetargeterConfig().orientation,
+        staged_optimization=RetargeterConfig().staged_optimization,
     )
 
 

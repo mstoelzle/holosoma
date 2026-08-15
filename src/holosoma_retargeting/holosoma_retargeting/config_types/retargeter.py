@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 
 
@@ -67,6 +68,33 @@ class OrientationTrackingConfig:
 
 
 @dataclass(frozen=True)
+class StagedOptimizationConfig:
+    """Configuration for a minimal limb-orientation-first solve.
+
+    The first stage keeps the segment-axis and smoothness objectives, drops
+    positional and full-orientation objectives, and temporarily attracts every
+    actuated joint toward the model-neutral pose. The unchanged full objective is
+    then solved for at least the same number of iterations, so the temporary prior
+    cannot keep a legitimate final pose away from a joint limit.
+    """
+
+    enable: bool = False
+    """Whether to use the limb-orientation-first schedule on every frame."""
+
+    iterations: int = 20
+    """SQP iterations in stage one and the minimum stage-two iteration budget."""
+
+    neutral_weight: float = 1.0
+    """Temporary model-neutral joint-pose weight used only by the coarse pass."""
+
+    def __post_init__(self) -> None:
+        if self.iterations <= 0:
+            raise ValueError("staged_optimization.iterations must be positive")
+        if not isfinite(self.neutral_weight) or self.neutral_weight <= 0.0:
+            raise ValueError("staged_optimization.neutral_weight must be finite and positive")
+
+
+@dataclass(frozen=True)
 class RetargeterConfig:
     """Configuration for retargeter parameters.
 
@@ -116,6 +144,9 @@ class RetargeterConfig:
 
     orientation: OrientationTrackingConfig = field(default_factory=OrientationTrackingConfig)
     """Configuration for optional Xsens orientation and segment-axis tracking."""
+
+    staged_optimization: StagedOptimizationConfig = field(default_factory=StagedOptimizationConfig)
+    """Optional two-stage limb-orientation-first optimization schedule."""
 
     w_nominal_tracking_init: float = 5.0
     """Initial weight for nominal tracking cost."""

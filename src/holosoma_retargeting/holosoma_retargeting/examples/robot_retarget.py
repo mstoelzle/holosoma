@@ -612,6 +612,7 @@ def build_retargeter_kwargs_from_config(
         "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "self_collision": retargeter_config.self_collision,
         "orientation": retargeter_config.orientation,
+        "staged_optimization": retargeter_config.staged_optimization,
         "step_size": retargeter_config.step_size,
         "initial_iterations": retargeter_config.initial_iterations,
         "iterations_per_frame": retargeter_config.iterations_per_frame,
@@ -751,6 +752,12 @@ def describe_retargeting_setup(
         (
             f"    [{'active' if nominal_active else 'inactive'}] nominal-pose tracking "
             f"(weight={retargeter.w_nominal_tracking_init}, nominal trajectory={nominal_status})"
+        ),
+        (
+            f"    [{'active' if retargeter.staged_optimization.enable else 'inactive'}] "
+            "limb-orientation-first schedule "
+            f"(stage iterations={retargeter.staged_optimization.iterations}, "
+            f"temporary neutral weight={retargeter.staged_optimization.neutral_weight})"
         ),
     ]
 
