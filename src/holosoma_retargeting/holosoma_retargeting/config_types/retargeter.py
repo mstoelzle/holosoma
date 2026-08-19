@@ -68,7 +68,7 @@ class OrientationTrackingConfig:
 
 @dataclass(frozen=True)
 class StagedOptimizationConfig:
-    """Configuration for an optional neutral-free orientation-first solve.
+    """Configuration for an optional orientation-first solve.
 
     The coarse stage uses the preceding accepted frame as its initialization and
     temporal reference. It retains the regularization, orientation, segment-axis,
@@ -139,7 +139,7 @@ class RetargeterConfig:
     """Configuration for optional Xsens orientation and segment-axis tracking."""
 
     staged_optimization: StagedOptimizationConfig = field(default_factory=StagedOptimizationConfig)
-    """Optional neutral-free orientation-first optimization schedule."""
+    """Optional orientation-first optimization schedule."""
 
     w_nominal_tracking_init: float = 5.0
     """Initial weight for nominal tracking cost."""

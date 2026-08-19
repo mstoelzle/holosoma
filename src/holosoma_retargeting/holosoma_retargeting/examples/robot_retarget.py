@@ -755,7 +755,7 @@ def describe_retargeting_setup(
         ),
         (
             f"    [{'active' if retargeter.staged_optimization.enable else 'inactive'}] "
-            "neutral-free orientation-first stage "
+            "orientation-first stage "
             f"(iterations={retargeter.staged_optimization.iterations})"
         ),
     ]
