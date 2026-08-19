@@ -115,6 +115,7 @@ def test_retargeting_summary_lists_active_objectives_and_rotation_offsets() -> N
     assert "[active] interaction-mesh positional/relational tracking" in summary
     assert "[active] full segment-orientation tracking" in summary
     assert "[active] segment-axis direction tracking" in summary
+    assert "[inactive] neutral-free orientation-first stage (iterations=20)" in summary
     assert "R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset" in summary
     assert "Left Hand -> left_rubber_hand_link" in summary
     assert "offset_wxyz=(+0.500000, +0.500000, +0.500000, +0.500000)" in summary

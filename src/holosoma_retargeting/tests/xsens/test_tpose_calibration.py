@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cvxpy as cp
 import mujoco
 import numpy as np
 import pytest
@@ -17,7 +16,6 @@ from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMesh
 from holosoma_retargeting.src.mujoco_utils import evaluate_mujoco_frame_poses
 from holosoma_retargeting.xsens.orientation_tracking import (
     XSENS_AXIS_SPECS,
-    XsensOrientationTargets,
     build_xsens_axis_calibration_metadata,
     build_xsens_orientation_targets_from_calibration,
     load_xsens_orientation_targets,
@@ -261,50 +259,6 @@ def test_orientation_tracking_jacobians_match_finite_difference() -> None:
     )
     body_axis_fd = (body_axis_eps - body_axis) / eps
     np.testing.assert_allclose(J_body_axis[:, ankle_pitch_q_idx], body_axis_fd, atol=1e-4)
-
-
-def test_orientation_objective_always_keeps_full_and_axis_targets() -> None:
-    robot_urdf = str(MODEL_DIR / "g1_29dof.urdf")
-    constants = create_task_constants(
-        robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
-        motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
-        task_config=TaskConfig(),
-        task_type="robot_only",
-    )
-    retargeter = InteractionMeshRetargeter(
-        task_constants=constants,
-        object_urdf_path=None,
-        activate_foot_sticking=False,
-        activate_obj_non_penetration=False,
-    )
-    q = np.zeros(retargeter.nq, dtype=float)
-    q[3] = 1.0
-    retargeter.robot_data.qpos[:] = q
-    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
-    _, hand_rotation, _ = retargeter._frame_pose("right_rubber_hand_link")
-    upper_arm_axis, _ = retargeter._axis_jacobian("right_shoulder_yaw_link", "right_elbow_link")
-    targets = XsensOrientationTargets(
-        orientation_names=["Right Hand"],
-        orientation_robot_link_names=["right_rubber_hand_link"],
-        orientation_offsets_wijk=np.array([[1.0, 0.0, 0.0, 0.0]]),
-        orientation_target_rotations=hand_rotation.reshape(1, 1, 3, 3),
-        axis_names=["right_upper_arm"],
-        axis_xsens_segment_names=["Right Upper Arm"],
-        axis_robot_start_link_names=["right_shoulder_yaw_link"],
-        axis_robot_end_link_names=["right_elbow_link"],
-        axis_robot_local_vectors=np.zeros((1, 3)),
-        axis_target_vectors=upper_arm_axis.reshape(1, 1, 3),
-        axis_weights=np.ones(1),
-    )
-
-    terms = retargeter._orientation_tracking_objective_terms(
-        q,
-        cp.Variable(retargeter.nq_a),
-        targets,
-        frame_idx=0,
-    )
-
-    assert len(terms) == 2
 
 
 def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
 from pathlib import Path
 
 
@@ -69,31 +68,23 @@ class OrientationTrackingConfig:
 
 @dataclass(frozen=True)
 class StagedOptimizationConfig:
-    """Configuration for a minimal orientation-first solve.
+    """Configuration for an optional neutral-free orientation-first solve.
 
-    The first stage keeps the segment-axis, full-orientation, and smoothness
-    objectives, drops only positional objectives, and temporarily attracts every
-    actuated joint toward the model-neutral pose. Keeping full orientations removes
-    the three-dimensional right-arm null space left by upper-arm and forearm axes
-    alone. The neutral continuation remains necessary to leave the saturated bad
-    basin; the unchanged full objective is then solved for at least the same number
-    of iterations.
+    The coarse stage uses the preceding accepted frame as its initialization and
+    temporal reference. It retains the regularization, orientation, segment-axis,
+    and constraint terms while dropping only positional interaction-mesh tracking.
+    The normal full objective then refines the coarse result.
     """
 
     enable: bool = False
     """Whether to use the orientation-first schedule on every frame."""
 
     iterations: int = 20
-    """SQP iterations in stage one and the minimum stage-two iteration budget."""
-
-    neutral_weight: float = 1.0
-    """Temporary model-neutral joint-pose weight used only by the coarse pass."""
+    """Coarse SQP iterations and the minimum full-refinement iteration budget."""
 
     def __post_init__(self) -> None:
         if self.iterations <= 0:
             raise ValueError("staged_optimization.iterations must be positive")
-        if not isfinite(self.neutral_weight) or self.neutral_weight <= 0.0:
-            raise ValueError("staged_optimization.neutral_weight must be finite and positive")
 
 
 @dataclass(frozen=True)
@@ -148,7 +139,7 @@ class RetargeterConfig:
     """Configuration for optional Xsens orientation and segment-axis tracking."""
 
     staged_optimization: StagedOptimizationConfig = field(default_factory=StagedOptimizationConfig)
-    """Optional two-stage limb-orientation-first optimization schedule."""
+    """Optional neutral-free orientation-first optimization schedule."""
 
     w_nominal_tracking_init: float = 5.0
     """Initial weight for nominal tracking cost."""

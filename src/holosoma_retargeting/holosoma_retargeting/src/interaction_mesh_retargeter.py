@@ -448,8 +448,11 @@ class InteractionMeshRetargeter:
                     "Axis target frame count does not match motion frame count: "
                     f"{orientation_targets.axis_target_vectors.shape[0]} vs {num_frames}"
                 )
-            if self.staged_optimization.enable and not orientation_targets.axis_names:
-                raise ValueError("staged_optimization.enable requires at least one segment-axis target")
+            if self.staged_optimization.enable:
+                if not orientation_targets.orientation_names:
+                    raise ValueError("staged_optimization.enable requires at least one full-orientation target")
+                if not orientation_targets.axis_names:
+                    raise ValueError("staged_optimization.enable requires at least one segment-axis target")
         if isinstance(object_points_local_demo, list):
             assert len(object_points_local_demo) == num_frames, (
                 f"object_points_local_demo length {len(object_points_local_demo)} != num_frames {num_frames}"
@@ -543,13 +546,11 @@ class InteractionMeshRetargeter:
                         adj_list=adj_list,
                         obj_pts_local=obj_pts_i,
                         foot_sticking=foot_sticking_sequences[i],
-                        w_nominal_tracking=self.staged_optimization.neutral_weight,
-                        q_a_nominal=self.robot_model.qpos0[self.q_a_indices],
                         orientation_targets=orientation_targets,
                         init_t=i == 0,
                         n_iter=self.staged_optimization.iterations,
                         frame_idx=i,
-                        limb_orientation_stage=True,
+                        include_position_tracking=False,
                     )
                     full_iterations = max(full_iterations, self.staged_optimization.iterations)
                 q, cost = self.iterate(
@@ -690,7 +691,7 @@ class InteractionMeshRetargeter:
         verbose=False,
         init_t=False,
         frame_idx: int = 0,
-        limb_orientation_stage: bool = False,
+        include_position_tracking: bool = True,
     ):
         """The main function to solve a single iteration of the DiffIK problem.
         Args:
@@ -704,8 +705,9 @@ class InteractionMeshRetargeter:
             obj_original: the original object pose (used for contact matching).
             init_t: the current time step is the first time step.
             frame_idx: frame index used by explicit foot lock window constraints.
-            limb_orientation_stage: omit positional terms while retaining full
-                orientation, segment-axis, temporal, neutral-pose, and hard constraints.
+            include_position_tracking: include the positional interaction-mesh
+                objective. Orientation, regularization, and constraints remain active
+                when this objective is disabled.
         """
         assert len(q_a_n_last) == self.nq_a
 
@@ -718,35 +720,42 @@ class InteractionMeshRetargeter:
         constraints = []
         obj_terms = []
 
-        if not limb_orientation_stage:
-            # Compute positional interaction-mesh terms only for the full objective.
+        if include_position_tracking:
+            # Compute Laplacian pieces
             J_OC_dict, p_OC_dict, _ = self._calc_manipulator_jacobians(
                 q, links=self.laplacian_match_links, obj_frame=(self.object_name != "ground")
             )
             robot_link_keys = list(self.laplacian_match_links.keys())
-            vertex_count = len(robot_link_keys) + len(obj_pts_local)
+            V_r = len(robot_link_keys)
+            V_o = len(obj_pts_local)
+            V = V_r + V_o
 
-            J_V = np.zeros((3 * vertex_count, self.nq_a))
-            for vertex_idx, key in enumerate(robot_link_keys):
-                J_V[3 * vertex_idx : 3 * (vertex_idx + 1), :] = J_OC_dict[key]
+            # Stack Jacobians for robot points
+            J_V = np.zeros((3 * V, self.nq_a))
+            for i, key in enumerate(robot_link_keys):
+                J_V[3 * i : 3 * (i + 1), :] = J_OC_dict[key]
 
-            robot_pts_local = np.array([p_OC_dict[key] for key in robot_link_keys])
-            vertices = np.vstack([robot_pts_local, obj_pts_local])
-            laplacian = calculate_laplacian_matrix(vertices, adj_list)
-            if not sp.issparse(laplacian):
-                laplacian = sp.csr_matrix(laplacian)
+            robot_pts_local = np.array([p_OC_dict[k] for k in robot_link_keys])
+            vertices = np.vstack([robot_pts_local, obj_pts_local])  # (V x 3)
 
-            kron_laplacian = sp.kron(laplacian, sp.eye(3, format="csr"), format="csr")
-            laplacian_jacobian = kron_laplacian @ J_V
-            current_laplacian = (laplacian @ vertices).reshape(-1)
-            target_laplacian_vector = target_laplacian.reshape(-1)
-            sqrt_weights = np.sqrt(np.repeat(self.laplacian_weights * np.ones(vertex_count), 3))
-            laplacian_step = cp.Variable(3 * vertex_count, name="laplacian")
+            L = calculate_laplacian_matrix(vertices, adj_list)  # (V x V), EXPECT SPARSE OR SMALL
+            if not sp.issparse(L):
+                L = sp.csr_matrix(L)
 
-            constraints.append(
-                cp.Constant(laplacian_jacobian[:, self.q_a_indices]) @ dqa - laplacian_step == -current_laplacian
-            )
-            obj_terms.append(cp.sum_squares(cp.multiply(sqrt_weights, laplacian_step - target_laplacian_vector)))
+            Kron = sp.kron(L, sp.eye(3, format="csr"), format="csr")
+            J_L = Kron @ J_V
+
+            lap0 = L @ vertices
+            lap0_vec = lap0.reshape(-1)  # (3V,)
+            target_lap_vec = target_laplacian.reshape(-1)  # (3V,)
+
+            w_v = (self.laplacian_weights * np.ones(V)).astype(float)  # (V,)
+            sqrt_w3 = np.sqrt(np.repeat(w_v, 3))
+            lap_var = cp.Variable(3 * V, name="laplacian")
+
+            # Linear equality and positional objective
+            constraints += [cp.Constant(J_L[:, self.q_a_indices]) @ dqa - lap_var == -lap0_vec]
+            obj_terms.append(cp.sum_squares(cp.multiply(sqrt_w3, lap_var - target_lap_vec)))
 
         # Foot constraints (sticking + foot lock window Z pinning)
         apply_foot_sticking = (self.q_a_init_idx < 12) and self.activate_foot_sticking
@@ -820,11 +829,7 @@ class InteractionMeshRetargeter:
 
         # nominal tracking for selected indices
         if (w_nominal_tracking > 0) and (q_a_nominal is not None):
-            idx = (
-                np.flatnonzero(self.q_a_indices >= 7)
-                if limb_orientation_stage
-                else np.array(self.track_nominal_indices, dtype=int)
-            )
+            idx = np.array(self.track_nominal_indices, dtype=int)
             if idx.size > 0:
                 z = dqa[idx] - (q_a_nominal[idx] - q_a_n_last[idx])
                 obj_terms.append(w_nominal_tracking * cp.sum_squares(z))
@@ -846,14 +851,7 @@ class InteractionMeshRetargeter:
                 obj_terms.append(cp.quad_form(dqa - dqa_smooth, Wsmooth))
 
         if orientation_targets is not None:
-            obj_terms.extend(
-                self._orientation_tracking_objective_terms(
-                    q,
-                    dqa,
-                    orientation_targets,
-                    frame_idx,
-                )
-            )
+            obj_terms.extend(self._orientation_tracking_objective_terms(q, dqa, orientation_targets, frame_idx))
 
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
@@ -1128,9 +1126,9 @@ class InteractionMeshRetargeter:
         init_t: bool = False,
         n_iter: int = 10,
         frame_idx: int = 0,
-        limb_orientation_stage: bool = False,
+        include_position_tracking: bool = True,
     ):
-        """Iterate either the full or limb-orientation stage until convergence."""
+        """Iterate the selected objective until convergence."""
         last_cost = np.inf
         for _ in range(n_iter):
             q_a_n_last = q_n[self.q_a_indices]
@@ -1147,7 +1145,7 @@ class InteractionMeshRetargeter:
                 orientation_targets=orientation_targets,
                 init_t=init_t,
                 frame_idx=frame_idx,
-                limb_orientation_stage=limb_orientation_stage,
+                include_position_tracking=include_position_tracking,
             )
             if np.isclose(cost, last_cost):
                 break

@@ -755,9 +755,8 @@ def describe_retargeting_setup(
         ),
         (
             f"    [{'active' if retargeter.staged_optimization.enable else 'inactive'}] "
-            "limb-orientation-first schedule "
-            f"(stage iterations={retargeter.staged_optimization.iterations}, "
-            f"temporary neutral weight={retargeter.staged_optimization.neutral_weight})"
+            "neutral-free orientation-first stage "
+            f"(iterations={retargeter.staged_optimization.iterations})"
         ),
     ]
 

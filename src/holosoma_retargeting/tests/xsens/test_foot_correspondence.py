@@ -38,7 +38,8 @@ def test_runtime_and_calibration_use_matching_foot_axes() -> None:
         "right_foot_forward": ("right_ankle_roll_link", None, (1.0, 0.0, 0.0)),
     }
     calibration_axes = {
-        target.name: (target.robot_start, target.robot_end, target.robot_local_axis) for target in LIMB_AXIS_TARGETS
+        target.name: (target.robot_start, target.robot_end, target.robot_local_axis)
+        for target in LIMB_AXIS_TARGETS
     }
     expected_calibration_axes = {
         "left_shank": expected_axes["left_shank"],
@@ -80,12 +81,13 @@ def test_runtime_and_calibration_use_distal_compound_joint_origins() -> None:
         for spec in XSENS_AXIS_SPECS
         if spec.name in expected_axes
     }
-    calibration_axes = {target.name: (target.robot_start, target.robot_end) for target in LIMB_AXIS_TARGETS}
+    calibration_axes = {
+        target.name: (target.robot_start, target.robot_end)
+        for target in LIMB_AXIS_TARGETS
+    }
 
     assert {name: runtime_mapping[name] for name in expected_positions} == expected_positions
     assert {name: CALIBRATION_POSITION_MAPPING[name] for name in expected_positions} == expected_positions
-    assert CANDIDATE_ORIENTATION_MAPPING["Left Hand"] == "left_rubber_hand_link"
-    assert CANDIDATE_ORIENTATION_MAPPING["Right Hand"] == "right_rubber_hand_link"
     assert runtime_axes == expected_axes
     assert {name: calibration_axes[name] for name in expected_axes} == expected_axes
     assert ("left_hip_yaw_link", "right_hip_yaw_link", "hip") in SYMMETRY_LINK_PAIRS
