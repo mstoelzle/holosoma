@@ -402,6 +402,11 @@ def test_batch_summary_layout(tmp_path: Path) -> None:
     assert '"sequence_name": "one"' in payload
 
 
+def test_actor_overlay_is_enabled_by_default() -> None:
+    config = analysis.Config(sequence_names=("serve_01",))
+    assert config.actor_spacing_m == 0.0
+
+
 def test_overlay_layout_aligns_actor_roots_in_xy_and_preserves_z() -> None:
     human = np.array([[4.0, 8.0, 1.0], [5.0, 9.0, 1.0]])
     target = np.array([[2.0, 3.0, 0.8], [3.0, 4.0, 0.8]])

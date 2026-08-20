@@ -94,7 +94,7 @@ class Config:
     sole_contact_height_threshold_m: float = 0.03
     viser_mode: Literal["none", "interactive", "record", "record-clips"] = "none"
     viser_port: int = 8080
-    actor_spacing_m: float = 2.0
+    actor_spacing_m: float = 0.0
     camera_follow: bool = False
     trail_duration_s: float = 1.0
     record_path: Path | None = None
