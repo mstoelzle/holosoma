@@ -1679,7 +1679,11 @@ def actor_layout_translations(
     overlay: bool,
     spacing_m: float,
 ) -> dict[str, np.ndarray]:
-    """Return display-only translations for overlay or world-space side-by-side layouts."""
+    """Return display-only translations for overlay or world-space side-by-side layouts.
+
+    Overlay mode aligns actor roots horizontally while preserving each actor's
+    original vertical position.
+    """
 
     human_root = np.asarray(human_root_position_m, dtype=float)
     target_root = np.asarray(g1_xsens_root_position_m, dtype=float)
@@ -1693,9 +1697,13 @@ def actor_layout_translations(
     if not np.isfinite(spacing_m) or spacing_m < 0.0:
         raise ValueError("actor_spacing_m must be finite and non-negative")
     if overlay:
+        human_translation = robot_root - human_root
+        target_translation = robot_root - target_root
+        human_translation[..., 2] = 0.0
+        target_translation[..., 2] = 0.0
         return {
-            "human": robot_root - human_root,
-            "g1_xsens": robot_root - target_root,
+            "human": human_translation,
+            "g1_xsens": target_translation,
             "g1": np.zeros_like(robot_root),
         }
     offsets = {
@@ -1786,7 +1794,7 @@ def launch_viser(
         robot_dof=29,
         contains_object_in_qpos=False,
     )
-    robot_racket, _ = add_g1_tennis_racket(server)
+    robot_racket, robot_racket_meshes = add_g1_tennis_racket(server)
     server.scene.add_grid("/grid", width=20.0, height=20.0)
     com_handles = {
         actor: server.scene.add_point_cloud(
@@ -1856,6 +1864,10 @@ def launch_viser(
 
     with server.gui.add_folder("Camera", order=10.0):
         camera_follow = CameraFollowController(server, initial_enabled=config.camera_follow)
+    with server.gui.add_folder("Actors", order=15.0):
+        show_human = server.gui.add_checkbox("Show human Xsens", initial_value=True)
+        show_g1_xsens = server.gui.add_checkbox("Show G1-sized Xsens", initial_value=False)
+        show_g1 = server.gui.add_checkbox("Show physical G1", initial_value=True)
     with server.gui.add_folder("Analysis", order=20.0):
         overlay_layout = server.gui.add_checkbox("Overlay actors", initial_value=config.actor_spacing_m == 0.0)
         show_com = server.gui.add_checkbox("Show CoM and support", initial_value=True)
@@ -1875,6 +1887,21 @@ def launch_viser(
         )
 
     current_frame = [0]
+    actor_visibility = {
+        "human": show_human,
+        "g1_xsens": show_g1_xsens,
+        "g1": show_g1,
+    }
+
+    def actor_is_visible(actor: str) -> bool:
+        return bool(actor_visibility[actor].value)
+
+    def apply_actor_visibility() -> None:
+        human_actor.set_visible(actor_is_visible("human"))
+        target_actor.set_visible(actor_is_visible("g1_xsens"))
+        robot_actor.show_visual = actor_is_visible("g1")
+        for mesh in robot_racket_meshes:
+            mesh.visible = actor_is_visible("g1")
 
     def apply_frame(frame: int) -> None:
         index = int(np.clip(frame, 0, len(data.times_s) - 1))
@@ -1896,6 +1923,7 @@ def launch_viser(
         q[:3] += translations["g1"]
         robot_applier.apply_qpos(q, has_object_input=False)
         update_g1_tennis_racket_pose(robot_racket, robot_urdf)
+        apply_actor_visibility()
         actor_data = {
             "human": (data.human_com_m, data.human_footprints, data.human_racket_position_m),
             "g1_xsens": (data.g1_xsens_com_m, data.g1_xsens_footprints, data.g1_xsens_racket_position_m),
@@ -1913,19 +1941,29 @@ def launch_viser(
             trail = racket[start : index + 1] + layout_translations(trail_indices)[actor]
             if len(trail) >= 2:
                 trail_handles[actor].points = np.stack([trail[:-1], trail[1:]], axis=1)
-            com_handles[actor].visible = bool(show_com.value)
-            projection_handles[actor].visible = bool(show_com.value)
-            polygon_handles[actor].visible = bool(show_com.value)
-            trail_handles[actor].visible = bool(show_trails.value)
-        camera_follow.update_target(
-            compute_camera_follow_target(
-                robot_position_m=data.g1_root_position_m[index] + translations["g1"],
-                avatar_positions_m=(
-                    data.human_positions_m[index] + translations["human"],
-                    data.g1_xsens_positions_m[index] + translations["g1_xsens"],
-                ),
+            visible = actor_is_visible(actor)
+            com_handles[actor].visible = visible and bool(show_com.value)
+            projection_handles[actor].visible = visible and bool(show_com.value)
+            polygon_handles[actor].visible = visible and bool(show_com.value)
+            trail_handles[actor].visible = visible and bool(show_trails.value)
+        visible_avatar_positions = []
+        if actor_is_visible("human"):
+            visible_avatar_positions.append(data.human_positions_m[index] + translations["human"])
+        if actor_is_visible("g1_xsens"):
+            visible_avatar_positions.append(
+                data.g1_xsens_positions_m[index] + translations["g1_xsens"]
             )
-        )
+        if actor_is_visible("g1") or visible_avatar_positions:
+            camera_follow.update_target(
+                compute_camera_follow_target(
+                    robot_position_m=(
+                        data.g1_root_position_m[index] + translations["g1"]
+                        if actor_is_visible("g1")
+                        else None
+                    ),
+                    avatar_positions_m=tuple(visible_avatar_positions),
+                )
+            )
         status.content = (
             f"**t={data.times_s[index]:.2f} s**  \n"
             f"Root-relative racket position error: "
@@ -1936,6 +1974,18 @@ def launch_viser(
         )
 
     @overlay_layout.on_update
+    def _(_event: Any) -> None:
+        apply_frame(current_frame[0])
+
+    @show_human.on_update
+    def _(_event: Any) -> None:
+        apply_frame(current_frame[0])
+
+    @show_g1_xsens.on_update
+    def _(_event: Any) -> None:
+        apply_frame(current_frame[0])
+
+    @show_g1.on_update
     def _(_event: Any) -> None:
         apply_frame(current_frame[0])
 

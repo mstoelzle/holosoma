@@ -402,7 +402,7 @@ def test_batch_summary_layout(tmp_path: Path) -> None:
     assert '"sequence_name": "one"' in payload
 
 
-def test_overlay_layout_aligns_all_actor_roots_to_physical_g1() -> None:
+def test_overlay_layout_aligns_actor_roots_in_xy_and_preserves_z() -> None:
     human = np.array([[4.0, 8.0, 1.0], [5.0, 9.0, 1.0]])
     target = np.array([[2.0, 3.0, 0.8], [3.0, 4.0, 0.8]])
     robot = np.array([[2.1, 3.1, 0.75], [3.1, 4.1, 0.75]])
@@ -413,8 +413,12 @@ def test_overlay_layout_aligns_all_actor_roots_to_physical_g1() -> None:
         overlay=True,
         spacing_m=2.0,
     )
-    np.testing.assert_allclose(human + translations["human"], robot)
-    np.testing.assert_allclose(target + translations["g1_xsens"], robot)
+    displayed_human = human + translations["human"]
+    displayed_target = target + translations["g1_xsens"]
+    np.testing.assert_allclose(displayed_human[:, :2], robot[:, :2])
+    np.testing.assert_allclose(displayed_target[:, :2], robot[:, :2])
+    np.testing.assert_allclose(displayed_human[:, 2], human[:, 2])
+    np.testing.assert_allclose(displayed_target[:, 2], target[:, 2])
     np.testing.assert_allclose(robot + translations["g1"], robot)
 
 
