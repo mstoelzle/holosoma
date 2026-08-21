@@ -36,8 +36,8 @@ XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.020, 0.027, 0.0)
 # The G1-proportioned hand uses a separate T-pose-derived correction because
 # its generated palm dimensions and preserved recorded orientations differ
 # from the measured subject mesh. A triangle-mesh contact scan refines the
-# palm-normal component to leave approximately 0.1 mm surface clearance.
-G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.0256, 0.0362, 0.0)
+# palm-normal component to leave approximately 0.05 mm surface clearance.
+G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.0256, 0.02775, 0.0)
 TENNIS_RACKET_GRIP_RADIUS_M = 0.018
 TENNIS_RACKET_GRIP_SECTIONS = 10
 

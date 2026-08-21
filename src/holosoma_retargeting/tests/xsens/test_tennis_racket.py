@@ -72,7 +72,7 @@ def test_global_attachment_places_grip_at_palm_surface_and_aligns_butt_to_hand_e
         palm_center[0],
         atol=5e-6,
     )
-    assert attachment.position_m[1] == pytest.approx(0.040105, abs=1e-9)
+    assert attachment.position_m[1] == pytest.approx(0.040005, abs=1e-9)
     butt_position = attachment.position_m - 0.09 * axis_hand
     palm_edge = np.where(axis_hand >= 0.0, attachment.palm_bounds_min_m, attachment.palm_bounds_max_m)
     assert np.dot(butt_position, axis_hand) == pytest.approx(np.dot(palm_edge, axis_hand), abs=1e-8)

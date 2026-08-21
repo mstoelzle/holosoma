@@ -116,7 +116,7 @@ G1_HAND_TO_XSENS_FRAME_WXYZ = np.array([0.5, 0.5, -0.5, 0.5])
 # The G1-proportioned Xsens model's pRightHandPalm landmark, expressed first
 # in Xsens hand coordinates. This deprecated alias is not the physical G1
 # hand-to-racket attachment, which comes exclusively from the JSON artifact.
-G1_XSENS_RACKET_GRIP_OFFSET_M = np.array([0.02995738, -0.09651599, -0.01196775])
+G1_XSENS_RACKET_GRIP_OFFSET_M = np.array([0.02995738, -0.09651599, -0.00680356])
 XSENS_RACKET_LONGITUDINAL_ROLL_WXYZ = np.array([np.sqrt(0.5), -np.sqrt(0.5), 0.0, 0.0])
 
 

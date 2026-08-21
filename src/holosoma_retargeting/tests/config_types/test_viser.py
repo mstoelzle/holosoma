@@ -321,7 +321,7 @@ def test_saved_racket_pose_interpolates_from_30_to_60_hz() -> None:
 def test_g1_racket_frame_maps_xsens_roll_through_g1_hand_axes() -> None:
     np.testing.assert_allclose(
         G1_XSENS_RACKET_GRIP_OFFSET_M,
-        [0.02995738, -0.09651599, -0.01196775],
+        [0.02995738, -0.09651599, -0.00680356],
     )
     np.testing.assert_allclose(
         G1_RACKET_FRAME_WXYZ,

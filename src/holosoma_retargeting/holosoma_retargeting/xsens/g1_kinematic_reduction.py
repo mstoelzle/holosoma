@@ -39,7 +39,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "13"
+G1_XSENS_REDUCTION_VERSION = "14"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -269,6 +269,44 @@ def _transverse_radii(points: np.ndarray, start: np.ndarray, end: np.ndarray) ->
     return np.maximum(extents, 0.008)
 
 
+def _hand_transverse_radii(points: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    """Return palm thickness and full hand width from a complete hand mesh.
+
+    The G1 rubber-hand mesh includes curled fingers. Its global transverse
+    bounding box therefore combines the palm-side extreme of the proximal
+    mesh with a finger-side extreme at the tip and is much thicker than any
+    physical cross-section. Use the proximal 45 percent of the mesh for palm
+    thickness while retaining the full mesh envelope for hand width.
+    """
+
+    axis = np.asarray(end - start, dtype=float)
+    norm = float(np.linalg.norm(axis))
+    if norm <= 1e-10:
+        return np.array([0.025, 0.025])
+    axis /= norm
+    reference = np.array([1.0, 0.0, 0.0])
+    if abs(float(np.dot(reference, axis))) > 0.9:
+        reference = np.array([0.0, 1.0, 0.0])
+    thickness_axis = reference - float(np.dot(reference, axis)) * axis
+    thickness_axis /= np.linalg.norm(thickness_axis)
+    width_axis = np.cross(axis, thickness_axis)
+
+    centered = points - start
+    longitudinal = centered @ axis
+    longitudinal_min = float(longitudinal.min())
+    longitudinal_span = float(np.ptp(longitudinal))
+    proximal = centered[longitudinal <= longitudinal_min + 0.45 * longitudinal_span]
+    if proximal.size == 0:
+        proximal = centered
+    extents = np.array(
+        [
+            np.ptp(proximal @ thickness_axis) * 0.5,
+            np.ptp(centered @ width_axis) * 0.5,
+        ]
+    )
+    return np.maximum(extents, 0.008)
+
+
 def _mean_sides(values: Mapping[str, float], metric: str) -> float:
     return 0.5 * (float(values[f"left_{metric}"]) + float(values[f"right_{metric}"]))
 
@@ -332,7 +370,11 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
                     body_rotations,
                     geom_names[metric],
                 )
-                radii_by_side[f"{side}_{metric}"] = _transverse_radii(mesh_points, start, end)
+                radii_by_side[f"{side}_{metric}"] = (
+                    _hand_transverse_radii(mesh_points, start, end)
+                    if metric == "hand"
+                    else _transverse_radii(mesh_points, start, end)
+                )
 
         offsets[f"{side}_shoulder"] = shoulder_yaw - shoulder_pitch
         offsets[f"{side}_hip"] = hip_yaw - hip_pitch
