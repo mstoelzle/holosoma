@@ -163,7 +163,10 @@ class MotionLoader:
             self.motion_base_poss_input = motion[:, :3]
             self.motion_base_rots_input = motion[:, 3:7]
 
-        self.motion_dof_poss_input = motion[:, 7:36]
+        # Layout: [base (7)] [DoFs (N)] [object (7), when present]. Derive the
+        # DoF boundary from the input instead of assuming a 29-DoF robot.
+        dof_end = motion.shape[1] - (7 if self.has_dynamic_object else 0)
+        self.motion_dof_poss_input = motion[:, 7:dof_end]
 
         if self.has_dynamic_object:
             if self.use_omniretarget_data:
