@@ -138,6 +138,9 @@ class XsensViserConfig(ViserConfig):
     xsens_frame_indices: tuple[int, ...] | None = None
     """Sparse post-resampling frames to play as a uniformly timed storyboard."""
 
+    allow_mismatched_sources: bool = False
+    """Allow robot qpos and Xsens actors whose recording filenames do not match."""
+
     show_xsens_meshes: bool = True
     """Whether Xsens avatar meshes are initially visible."""
 

@@ -48,7 +48,10 @@ from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
     validate_g1_xsens_usd,
     validate_subject_xsens_usd,
 )
-from holosoma_retargeting.transformation_utils import rotation_as_wxyz  # noqa: E402
+from holosoma_retargeting.transformation_utils import (  # noqa: E402
+    rotation_as_wxyz,
+    rotations_from_wxyz,
+)
 from holosoma_retargeting.xsens.avatar_mesh import build_tennis_racket_meshes  # noqa: E402
 from holosoma_retargeting.xsens.kinematic_model import TENNIS_RACKET_BODY  # noqa: E402
 from holosoma_retargeting.xsens.morphology_adaptation import (  # noqa: E402
@@ -181,6 +184,29 @@ def resolve_record_output_path(config: ViserConfig) -> str:
     return str(qpos_path.parent / f"{source_path.stem}.mp4")
 
 
+def validate_combined_recording_paths(
+    qpos_path: Path,
+    xsens_hdf5_path: Path,
+    *,
+    allow_mismatch: bool,
+) -> None:
+    """Reject accidental side-by-side playback of different recordings."""
+
+    if allow_mismatch:
+        return
+    qpos_stem = qpos_path.stem
+    xsens_stem = xsens_hdf5_path.stem
+    if qpos_stem == xsens_stem or qpos_stem.startswith(f"{xsens_stem}_"):
+        return
+    raise ValueError(
+        "Combined robot/Xsens playback requires results from the same recording.\n"
+        f"  qpos result: {qpos_path} (recording '{qpos_stem}')\n"
+        f"  Xsens HDF5: {xsens_hdf5_path} (recording '{xsens_stem}')\n"
+        "Select the HDF5 used to create the qpos result. For an intentional cross-recording "
+        "comparison, pass --allow-mismatched-sources."
+    )
+
+
 def compute_camera_follow_target(
     *,
     robot_position_m: np.ndarray | None = None,
@@ -291,14 +317,25 @@ def update_saved_tennis_racket_pose(
     racket_frame: Any,
     motion: TennisRacketMotion,
     frame_idx: int,
-    position_offset_m: np.ndarray | None = None,
+    *,
+    robot_world_position_m: np.ndarray,
+    robot_world_quaternion_wxyz: np.ndarray,
+    display_position_offset_m: np.ndarray | None = None,
 ) -> None:
-    """Apply an achieved racket pose saved alongside retargeted qpos."""
+    """Apply a saved world-space racket pose below the robot's base frame."""
 
     index = int(np.clip(frame_idx, 0, motion.position_m.shape[0] - 1))
-    offset = np.zeros(3) if position_offset_m is None else np.asarray(position_offset_m, dtype=float)
-    racket_frame.position = motion.position_m[index] + offset
-    racket_frame.wxyz = motion.quaternion_wxyz[index]
+    robot_position = np.asarray(robot_world_position_m, dtype=float).reshape(3)
+    robot_rotation = rotations_from_wxyz(robot_world_quaternion_wxyz)
+    offset = (
+        np.zeros(3)
+        if display_position_offset_m is None
+        else np.asarray(display_position_offset_m, dtype=float).reshape(3)
+    )
+    displayed_racket_position = motion.position_m[index] + offset
+    racket_frame.position = robot_rotation.inv().apply(displayed_racket_position - robot_position)
+    local_rotation = robot_rotation.inv() * rotations_from_wxyz(motion.quaternion_wxyz[index])
+    racket_frame.wxyz = rotation_as_wxyz(local_rotation)
 
 
 @dataclass(frozen=True)
@@ -707,7 +744,15 @@ def make_player(
             robot_applier.apply_frame(qpos, frame_idx)
             if g1_racket_frame is not None:
                 if tennis_racket_motion is not None:
-                    update_saved_tennis_racket_pose(g1_racket_frame, tennis_racket_motion, frame_idx)
+                    qpos_index = int(np.clip(frame_idx, 0, qpos.shape[0] - 1))
+                    update_saved_tennis_racket_pose(
+                        g1_racket_frame,
+                        tennis_racket_motion,
+                        qpos_index,
+                        robot_world_position_m=qpos[qpos_index, 0:3],
+                        robot_world_quaternion_wxyz=qpos[qpos_index, 3:7],
+                        display_position_offset_m=actor_offsets.get("robot"),
+                    )
                 else:
                     assert robot_urdf is not None
                     update_g1_tennis_racket_pose(g1_racket_frame, robot_urdf)
@@ -754,6 +799,9 @@ def make_player(
                         g1_racket_frame,
                         tennis_racket_motion,
                         round(time_s * actual_robot_fps),
+                        robot_world_position_m=sampled_qpos[0:3],
+                        robot_world_quaternion_wxyz=sampled_qpos[3:7],
+                        display_position_offset_m=actor_offsets.get("robot"),
                     )
                 camera_follow.update_target(sampled_qpos[0:3])
 
@@ -835,7 +883,9 @@ def make_player(
                         g1_racket_frame,
                         tennis_racket_motion,
                         racket_frame_idx,
-                        actor_offsets.get("robot"),
+                        robot_world_position_m=sampled_qpos[0:3],
+                        robot_world_quaternion_wxyz=sampled_qpos[3:7],
+                        display_position_offset_m=actor_offsets.get("robot"),
                     )
                 else:
                     assert robot_urdf is not None
@@ -895,16 +945,24 @@ def main(cfg: XsensViserConfig) -> None:
     fps: int | None = None
     xsens_motion: XsensHdf5Motion | None = None
     tennis_racket_motion: TennisRacketMotion | None = None
+    qpos_path: Path | None = None
     if "robot" in actor_modes:
-        requested_path = resolve_package_path(Path(cfg.qpos_npz).expanduser())
-        result = load_retargeting_result(requested_path)
+        qpos_path = resolve_package_path(Path(cfg.qpos_npz).expanduser())
+        result = load_retargeting_result(qpos_path)
         qpos, fps = result.qpos, round(result.fps)
         tennis_racket_motion = result.tennis_racket
     if "xsens" in actor_modes or "g1_xsens" in actor_modes:
         if cfg.xsens_hdf5 is None:
             raise ValueError(f"actor_modes={actor_modes} requires --xsens-hdf5")
+        xsens_hdf5_path = resolve_package_path(cfg.xsens_hdf5)
+        if qpos_path is not None:
+            validate_combined_recording_paths(
+                qpos_path,
+                xsens_hdf5_path,
+                allow_mismatch=cfg.allow_mismatched_sources,
+            )
         xsens_motion = load_xsens_hdf5_motion(
-            resolve_package_path(cfg.xsens_hdf5),
+            xsens_hdf5_path,
             target_fps=cfg.xsens_target_fps,
             frame_indices=cfg.xsens_frame_indices,
             include_tracked_props=True,
