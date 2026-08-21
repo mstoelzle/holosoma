@@ -36,6 +36,7 @@ from holosoma_retargeting.src.viser_utils import (  # noqa: E402
     create_motion_control_sliders,
     create_timed_motion_control_sliders,
     interpolation_window,
+    quat_slerp,
     sample_qpos_at_time,
 )
 from holosoma_retargeting.src.xsens_viser import (  # noqa: E402
@@ -316,15 +317,20 @@ def update_g1_tennis_racket_pose(
 def update_saved_tennis_racket_pose(
     racket_frame: Any,
     motion: TennisRacketMotion,
-    frame_idx: int,
+    time_s: float,
     *,
+    motion_fps: float,
     robot_world_position_m: np.ndarray,
     robot_world_quaternion_wxyz: np.ndarray,
     display_position_offset_m: np.ndarray | None = None,
 ) -> None:
-    """Apply a saved world-space racket pose below the robot's base frame."""
+    """Apply an interpolated saved world-space racket pose below the robot's base frame."""
 
-    index = int(np.clip(frame_idx, 0, motion.position_m.shape[0] - 1))
+    racket_position, racket_quaternion = sample_tennis_racket_pose_at_time(
+        motion,
+        time_s,
+        fps=motion_fps,
+    )
     robot_position = np.asarray(robot_world_position_m, dtype=float).reshape(3)
     robot_rotation = rotations_from_wxyz(robot_world_quaternion_wxyz)
     offset = (
@@ -332,10 +338,38 @@ def update_saved_tennis_racket_pose(
         if display_position_offset_m is None
         else np.asarray(display_position_offset_m, dtype=float).reshape(3)
     )
-    displayed_racket_position = motion.position_m[index] + offset
+    displayed_racket_position = racket_position + offset
     racket_frame.position = robot_rotation.inv().apply(displayed_racket_position - robot_position)
-    local_rotation = robot_rotation.inv() * rotations_from_wxyz(motion.quaternion_wxyz[index])
+    local_rotation = robot_rotation.inv() * rotations_from_wxyz(racket_quaternion)
     racket_frame.wxyz = rotation_as_wxyz(local_rotation)
+
+
+def sample_tennis_racket_pose_at_time(
+    motion: TennisRacketMotion,
+    time_s: float,
+    *,
+    fps: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample a uniform-rate racket pose using position LERP and quaternion SLERP."""
+
+    if not np.isfinite(time_s):
+        raise ValueError("Tennis-racket sample time must be finite")
+    if not np.isfinite(fps) or fps <= 0.0:
+        raise ValueError("Tennis-racket motion FPS must be finite and positive")
+    frame_count = motion.position_m.shape[0]
+    if frame_count == 0:
+        raise ValueError("Cannot sample an empty tennis-racket motion")
+    frame_position = float(np.clip(time_s * fps, 0.0, frame_count - 1))
+    lower = int(np.floor(frame_position))
+    upper = min(lower + 1, frame_count - 1)
+    weight = frame_position - lower
+    position = (1.0 - weight) * motion.position_m[lower] + weight * motion.position_m[upper]
+    quaternion = quat_slerp(
+        motion.quaternion_wxyz[lower],
+        motion.quaternion_wxyz[upper],
+        weight,
+    )
+    return position, quaternion
 
 
 @dataclass(frozen=True)
@@ -748,7 +782,8 @@ def make_player(
                     update_saved_tennis_racket_pose(
                         g1_racket_frame,
                         tennis_racket_motion,
-                        qpos_index,
+                        qpos_index / actual_robot_fps,
+                        motion_fps=actual_robot_fps,
                         robot_world_position_m=qpos[qpos_index, 0:3],
                         robot_world_quaternion_wxyz=qpos[qpos_index, 3:7],
                         display_position_offset_m=actor_offsets.get("robot"),
@@ -798,7 +833,8 @@ def make_player(
                     update_saved_tennis_racket_pose(
                         g1_racket_frame,
                         tennis_racket_motion,
-                        round(time_s * actual_robot_fps),
+                        time_s,
+                        motion_fps=actual_robot_fps,
                         robot_world_position_m=sampled_qpos[0:3],
                         robot_world_quaternion_wxyz=sampled_qpos[3:7],
                         display_position_offset_m=actor_offsets.get("robot"),
@@ -875,14 +911,11 @@ def make_player(
             robot_applier.apply_qpos(sampled_qpos, has_object_input=has_object)
             if g1_racket_frame is not None:
                 if tennis_racket_motion is not None:
-                    racket_frame_idx = min(
-                        round(time_s * actual_robot_fps),
-                        tennis_racket_motion.position_m.shape[0] - 1,
-                    )
                     update_saved_tennis_racket_pose(
                         g1_racket_frame,
                         tennis_racket_motion,
-                        racket_frame_idx,
+                        time_s,
+                        motion_fps=actual_robot_fps,
                         robot_world_position_m=sampled_qpos[0:3],
                         robot_world_quaternion_wxyz=sampled_qpos[3:7],
                         display_position_offset_m=actor_offsets.get("robot"),

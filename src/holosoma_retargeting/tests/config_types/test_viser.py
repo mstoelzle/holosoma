@@ -28,6 +28,7 @@ from holosoma_retargeting.viser_player import (
     resolve_actor_modes,
     resolve_actor_offsets,
     resolve_record_output_path,
+    sample_tennis_racket_pose_at_time,
     update_g1_tennis_racket_pose,
     update_saved_tennis_racket_pose,
     validate_combined_recording_paths,
@@ -285,7 +286,8 @@ def test_saved_world_racket_pose_is_converted_to_robot_local_frame() -> None:
     update_saved_tennis_racket_pose(
         racket,
         motion,
-        0,
+        0.0,
+        motion_fps=30.0,
         robot_world_position_m=np.array([1.0, 4.0, 1.0]),
         robot_world_quaternion_wxyz=quarter_turn_about_z_wxyz,
         display_position_offset_m=np.array([0.0, 2.0, 0.0]),
@@ -293,6 +295,27 @@ def test_saved_world_racket_pose_is_converted_to_robot_local_frame() -> None:
 
     np.testing.assert_allclose(racket.position, [2.0, -1.0, 2.0], atol=1e-12)
     np.testing.assert_allclose(racket.wxyz, [np.sqrt(0.5), 0.0, 0.0, -np.sqrt(0.5)], atol=1e-12)
+
+
+def test_saved_racket_pose_interpolates_from_30_to_60_hz() -> None:
+    motion = SimpleNamespace(
+        position_m=np.array([[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]]),
+        quaternion_wxyz=np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+    )
+
+    position, quaternion = sample_tennis_racket_pose_at_time(
+        motion,
+        1.0 / 60.0,
+        fps=30.0,
+    )
+
+    np.testing.assert_allclose(position, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(quaternion, [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)], atol=1e-12)
 
 
 def test_g1_racket_frame_maps_xsens_roll_through_g1_hand_axes() -> None:
