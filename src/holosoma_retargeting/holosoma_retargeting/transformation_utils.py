@@ -7,6 +7,7 @@ from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 __all__ = [
     "normalize_quaternions_wxyz",
+    "normalize_vector",
     "position_quaternion_from_transform",
     "quaternion_conjugate",
     "quaternion_multiply",
@@ -40,6 +41,18 @@ def normalize_quaternions_wxyz(
         return normalized
     signs = np.where(normalized[..., :1] < 0.0, -1.0, 1.0)
     return normalized * signs
+
+
+def normalize_vector(vector: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
+    """Normalize one vector, returning a deterministic fallback when it is degenerate."""
+
+    value = np.asarray(vector, dtype=float)
+    norm = float(np.linalg.norm(value))
+    if norm > 1e-9:
+        return value / norm
+    if fallback is None:
+        return np.zeros_like(value)
+    return np.asarray(fallback, dtype=float)
 
 
 def quaternion_conjugate(quaternions_wxyz: np.ndarray) -> np.ndarray:

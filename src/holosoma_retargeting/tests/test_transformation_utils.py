@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from holosoma_retargeting.transformation_utils import (
     normalize_quaternions_wxyz,
+    normalize_vector,
     position_quaternion_from_transform,
     quaternion_conjugate,
     quaternion_multiply,
@@ -88,6 +89,13 @@ def test_quaternion_conjugate_and_multiply_support_broadcast_batches() -> None:
         np.broadcast_to(np.eye(3), (2, 3, 3)),
         atol=1e-15,
     )
+
+
+def test_normalize_vector_uses_fallback_for_degenerate_input() -> None:
+    np.testing.assert_allclose(normalize_vector(np.array([3.0, 0.0, 4.0])), [0.6, 0.0, 0.8])
+    np.testing.assert_array_equal(normalize_vector(np.zeros(3)), np.zeros(3))
+    fallback = np.array([1.0, 0.0, 0.0])
+    np.testing.assert_array_equal(normalize_vector(np.full(3, 1e-12), fallback), fallback)
 
 
 def test_vector_rotation_supports_broadcasting_and_matches_scipy() -> None:
