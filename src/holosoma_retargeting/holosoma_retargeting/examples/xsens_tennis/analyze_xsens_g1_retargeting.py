@@ -37,9 +37,10 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (  # noqa: E402
     sample_indices_by_time,
     transform_xsens_stream_to_retargeting,
 )
-from holosoma_retargeting.kinematics import KinematicTree, rotate_vectors  # noqa: E402
+from holosoma_retargeting.kinematics import KinematicTree  # noqa: E402
 from holosoma_retargeting.src.paths import DEMO_RESULTS_DIR, PACKAGE_ROOT  # noqa: E402
 from holosoma_retargeting.transformation_utils import (  # noqa: E402
+    rotate_vectors,
     rotation_as_wxyz,
     rotations_from_wxyz,
 )

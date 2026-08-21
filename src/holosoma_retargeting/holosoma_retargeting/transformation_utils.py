@@ -8,11 +8,17 @@ from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 __all__ = [
     "normalize_quaternions_wxyz",
     "position_quaternion_from_transform",
+    "quaternion_conjugate",
+    "quaternion_multiply",
+    "rotate_vector",
+    "rotate_vectors",
     "rotation_as_wxyz",
     "rotation_matrices_as_wxyz",
     "rotation_matrices_from_wxyz",
     "rotations_from_wxyz",
     "transform_from_position_quaternion",
+    "transform_point",
+    "transform_points",
 ]
 
 
@@ -34,6 +40,104 @@ def normalize_quaternions_wxyz(
         return normalized
     signs = np.where(normalized[..., :1] < 0.0, -1.0, 1.0)
     return normalized * signs
+
+
+def quaternion_conjugate(quaternions_wxyz: np.ndarray) -> np.ndarray:
+    """Return normalized scalar-first quaternion conjugates without changing their signs."""
+
+    values = normalize_quaternions_wxyz(quaternions_wxyz, canonical=False)
+    result = values.copy()
+    result[..., 1:] *= -1.0
+    return result
+
+
+def quaternion_multiply(left_wxyz: np.ndarray, right_wxyz: np.ndarray) -> np.ndarray:
+    """Multiply broadcast-compatible scalar-first rotation quaternions."""
+
+    left = normalize_quaternions_wxyz(left_wxyz, canonical=False)
+    right = normalize_quaternions_wxyz(right_wxyz, canonical=False)
+    try:
+        left, right = np.broadcast_arrays(left, right)
+    except ValueError as error:
+        raise ValueError(
+            f"Quaternion arrays are not broadcast-compatible: {left.shape} and {right.shape}"
+        ) from error
+    lw, lx, ly, lz = np.moveaxis(left, -1, 0)
+    rw, rx, ry, rz = np.moveaxis(right, -1, 0)
+    product = np.stack(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        ),
+        axis=-1,
+    )
+    return normalize_quaternions_wxyz(product, canonical=False)
+
+
+def rotate_vectors(quaternions_wxyz: np.ndarray, vectors: np.ndarray) -> np.ndarray:
+    """Rotate broadcast-compatible vectors by scalar-first quaternions."""
+
+    quaternions = normalize_quaternions_wxyz(quaternions_wxyz, canonical=False)
+    values = np.asarray(vectors, dtype=float)
+    if values.ndim < 1 or values.shape[-1] != 3:
+        raise ValueError(f"Expected vector array ending in 3, got {values.shape}")
+    if not np.isfinite(values).all():
+        raise ValueError("Vectors must contain finite values")
+    try:
+        vector_part, values = np.broadcast_arrays(quaternions[..., 1:], values)
+        scalar_part = np.broadcast_to(quaternions[..., :1], vector_part.shape[:-1] + (1,))
+    except ValueError as error:
+        raise ValueError(
+            f"Quaternion and vector arrays are not broadcast-compatible: {quaternions.shape} and {values.shape}"
+        ) from error
+    twice_cross = 2.0 * np.cross(vector_part, values)
+    return values + scalar_part * twice_cross + np.cross(vector_part, twice_cross)
+
+
+def rotate_vector(quaternion_wxyz: np.ndarray, vector: np.ndarray) -> np.ndarray:
+    """Rotate one vector by one scalar-first quaternion."""
+
+    quaternion = np.asarray(quaternion_wxyz, dtype=float)
+    value = np.asarray(vector, dtype=float)
+    if quaternion.shape != (4,) or value.shape != (3,):
+        raise ValueError("Quaternion and vector must have shapes (4,) and (3,)")
+    return rotate_vectors(quaternion, value)
+
+
+def transform_points(
+    position_m: np.ndarray,
+    quaternion_wxyz: np.ndarray,
+    points_m: np.ndarray,
+) -> np.ndarray:
+    """Apply one or more broadcast-compatible position/quaternion transforms to points."""
+
+    positions = np.asarray(position_m, dtype=float)
+    if positions.ndim < 1 or positions.shape[-1] != 3 or not np.isfinite(positions).all():
+        raise ValueError(f"Expected finite position array ending in 3, got {positions.shape}")
+    rotated = rotate_vectors(quaternion_wxyz, points_m)
+    try:
+        return positions + rotated
+    except ValueError as error:
+        raise ValueError(
+            f"Position and rotated-point arrays are not broadcast-compatible: {positions.shape} and {rotated.shape}"
+        ) from error
+
+
+def transform_point(
+    position_m: np.ndarray,
+    quaternion_wxyz: np.ndarray,
+    point_m: np.ndarray,
+) -> np.ndarray:
+    """Apply one position/quaternion transform to one point."""
+
+    position = np.asarray(position_m, dtype=float)
+    quaternion = np.asarray(quaternion_wxyz, dtype=float)
+    point = np.asarray(point_m, dtype=float)
+    if position.shape != (3,) or quaternion.shape != (4,) or point.shape != (3,):
+        raise ValueError("Position, quaternion, and point must have shapes (3,), (4,), and (3,)")
+    return transform_points(position, quaternion, point)
 
 
 def rotations_from_wxyz(quaternions_wxyz: np.ndarray) -> Rotation:

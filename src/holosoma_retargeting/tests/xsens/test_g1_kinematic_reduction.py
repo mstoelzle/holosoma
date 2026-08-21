@@ -15,7 +15,7 @@ from holosoma_retargeting.kinematics import (
     compute_reference_joint_positions,
     validate_kinematic_tree,
 )
-from holosoma_retargeting.kinematics.model import rotate_vector
+from holosoma_retargeting.transformation_utils import rotate_vector
 from holosoma_retargeting.viser_player import G1_XSENS_RACKET_GRIP_OFFSET_M
 from holosoma_retargeting.xsens import morphology_adaptation
 from holosoma_retargeting.xsens.avatar_mesh import build_xsens_avatar_meshes

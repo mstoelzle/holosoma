@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 from holosoma_retargeting.config_types.viser import ViserConfig, XsensViserConfig
 from holosoma_retargeting.config_values.viser import get_default_xsens_viser_config
-from holosoma_retargeting.kinematics.model import quaternion_multiply
 from holosoma_retargeting.src.viser_utils import CameraFollowController, resolve_frame_times
+from holosoma_retargeting.transformation_utils import quaternion_multiply
 from holosoma_retargeting.viser_player import (
     G1_HAND_TO_XSENS_FRAME_WXYZ,
     G1_RACKET_FRAME_WXYZ,

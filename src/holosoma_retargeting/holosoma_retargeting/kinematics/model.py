@@ -7,6 +7,8 @@ from typing import Mapping, TypeAlias
 
 import numpy as np
 
+from holosoma_retargeting.transformation_utils import transform_point
+
 MetadataScalar: TypeAlias = str | int | float | bool
 MetadataValue: TypeAlias = MetadataScalar | tuple[MetadataScalar, ...]
 
@@ -103,83 +105,6 @@ class ValidationReport:
             raise ValueError("Invalid kinematic tree:\n- " + "\n- ".join(self.errors))
 
 
-def _normalized_quaternion(quaternion: np.ndarray) -> np.ndarray:
-    quaternion = np.asarray(quaternion, dtype=float)
-    norm = float(np.linalg.norm(quaternion))
-    if norm <= 1e-12:
-        raise ValueError("Quaternion norm must be positive")
-    return quaternion / norm
-
-
-def _quat_multiply(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    lw, lx, ly, lz = _normalized_quaternion(left)
-    rw, rx, ry, rz = _normalized_quaternion(right)
-    return np.array(
-        [
-            lw * rw - lx * rx - ly * ry - lz * rz,
-            lw * rx + lx * rw + ly * rz - lz * ry,
-            lw * ry - lx * rz + ly * rw + lz * rx,
-            lw * rz + lx * ry - ly * rx + lz * rw,
-        ]
-    )
-
-
-def quaternion_conjugate(quaternion: np.ndarray) -> np.ndarray:
-    q = _normalized_quaternion(quaternion)
-    return np.array([q[0], -q[1], -q[2], -q[3]])
-
-
-def quaternion_multiply(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    return _normalized_quaternion(_quat_multiply(left, right))
-
-
-def rotate_vector(quaternion: np.ndarray, vector: np.ndarray) -> np.ndarray:
-    """Rotate one vector while preserving the original scalar API."""
-
-    quaternion_array = np.asarray(quaternion, dtype=float)
-    vector_array = np.asarray(vector, dtype=float)
-    if quaternion_array.shape != (4,) or vector_array.shape != (3,):
-        raise ValueError("Quaternion and vector must have shapes (4,) and (3,)")
-    return rotate_vectors(quaternion_array, vector_array)
-
-
-def rotate_vectors(quaternions: np.ndarray, vectors: np.ndarray) -> np.ndarray:
-    """Rotate broadcast-compatible vectors by scalar-first quaternions."""
-
-    quaternion_array = np.asarray(quaternions, dtype=float)
-    vector_array = np.asarray(vectors, dtype=float)
-    if quaternion_array.shape[-1:] != (4,) or vector_array.shape[-1:] != (3,):
-        raise ValueError("Quaternion and vector arrays must end in dimensions 4 and 3")
-    norms = np.linalg.norm(quaternion_array, axis=-1, keepdims=True)
-    if np.any(norms <= 1e-12):
-        raise ValueError("Quaternion norm must be positive")
-    normalized = quaternion_array / norms
-    vector_part = normalized[..., 1:]
-    twice_cross = 2.0 * np.cross(vector_part, vector_array)
-    return (
-        vector_array
-        + normalized[..., :1] * twice_cross
-        + np.cross(vector_part, twice_cross)
-    )
-
-
-def _quat_multiply_raw(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    lw, lx, ly, lz = np.asarray(left, dtype=float)
-    rw, rx, ry, rz = np.asarray(right, dtype=float)
-    return np.array(
-        [
-            lw * rw - lx * rx - ly * ry - lz * rz,
-            lw * rx + lx * rw + ly * rz - lz * ry,
-            lw * ry - lx * rz + ly * rw + lz * rx,
-            lw * rz + lx * ry - ly * rx + lz * rw,
-        ]
-    )
-
-
-def transform_point(transform: Transform, point_m: np.ndarray) -> np.ndarray:
-    return np.asarray(transform.translation_m, dtype=float) + rotate_vector(transform.rotation_wxyz, point_m)
-
-
 def compute_joint_positions(
     model: KinematicTree,
     body_poses: Mapping[str, Transform],
@@ -190,7 +115,12 @@ def compute_joint_positions(
     for joint in model.joints:
         if joint.child_body not in body_poses:
             raise KeyError(f"Missing pose for child body '{joint.child_body}'")
-        positions[joint.name] = transform_point(body_poses[joint.child_body], joint.child_frame.translation_m)
+        child_pose = body_poses[joint.child_body]
+        positions[joint.name] = transform_point(
+            child_pose.translation_m,
+            child_pose.rotation_wxyz,
+            joint.child_frame.translation_m,
+        )
     return positions
 
 
@@ -230,12 +160,16 @@ def validate_kinematic_tree(model: KinematicTree, *, anchor_tolerance_m: float =
             )
         children[joint.child_body] = joint.name
         adjacency[joint.parent_body].append(joint.child_body)
+        parent_pose = body_map[joint.parent_body].reference_pose
         parent_position = transform_point(
-            body_map[joint.parent_body].reference_pose,
+            parent_pose.translation_m,
+            parent_pose.rotation_wxyz,
             joint.parent_frame.translation_m,
         )
+        child_pose = body_map[joint.child_body].reference_pose
         child_position = transform_point(
-            body_map[joint.child_body].reference_pose,
+            child_pose.translation_m,
+            child_pose.rotation_wxyz,
             joint.child_frame.translation_m,
         )
         residual = float(np.linalg.norm(parent_position - child_position))
