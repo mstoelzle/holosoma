@@ -321,7 +321,7 @@ def test_saved_racket_pose_interpolates_from_30_to_60_hz() -> None:
 def test_g1_racket_frame_maps_xsens_roll_through_g1_hand_axes() -> None:
     np.testing.assert_allclose(
         G1_XSENS_RACKET_GRIP_OFFSET_M,
-        [0.02995738, -0.09651599, 0.01196775],
+        [0.02995738, -0.09651599, -0.01196775],
     )
     np.testing.assert_allclose(
         G1_RACKET_FRAME_WXYZ,
@@ -365,6 +365,11 @@ def test_g1_tennis_racket_geometry_uses_shared_xsens_mesh_parts() -> None:
         "racket_frame",
         "racket_strings",
     ]
+    grip_bounds = np.stack(
+        [mesh_handles[0].vertices.min(axis=0), mesh_handles[0].vertices.max(axis=0)]
+    )
+    np.testing.assert_allclose(grip_bounds[:, 0], [-0.09, 0.09], atol=1e-8)
+    np.testing.assert_allclose(grip_bounds[:, 1], [-0.018, 0.018], atol=1e-8)
 
 
 def test_tennis_control_is_absent_when_no_actor_has_a_racket() -> None:

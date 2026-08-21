@@ -62,6 +62,24 @@ def test_build_targets_has_exact_180_degree_racket_symmetry() -> None:
     ) == pytest.approx(0.0, abs=1e-12)
 
 
+def test_global_attachment_centers_grip_transversely_and_aligns_butt_to_hand_edge() -> None:
+    attachment = load_tennis_racket_attachment()
+    rotation = Rotation.from_quat(attachment.quaternion_wxyz[[1, 2, 3, 0]])
+    axis_hand = rotation.apply(attachment.longitudinal_axis_local)
+    palm_center = 0.5 * (attachment.palm_bounds_min_m + attachment.palm_bounds_max_m)
+    longitudinal_delta = np.dot(attachment.position_m - palm_center, axis_hand) * axis_hand
+
+    np.testing.assert_allclose(
+        attachment.position_m - palm_center - longitudinal_delta,
+        np.zeros(3),
+        atol=5e-6,
+    )
+    butt_position = attachment.position_m - 0.09 * axis_hand
+    palm_edge = np.where(axis_hand >= 0.0, attachment.palm_bounds_min_m, attachment.palm_bounds_max_m)
+    assert np.dot(butt_position, axis_hand) == pytest.approx(np.dot(palm_edge, axis_hand), abs=1e-8)
+    assert attachment_handle_intersects_palm(attachment)
+
+
 def test_branch_selection_tracks_nearest_realized_hand_and_prior_tie_break() -> None:
     targets = build_tennis_racket_targets(_motion(), load_tennis_racket_attachment())
     candidates = targets.candidate_hand_rotations[0]

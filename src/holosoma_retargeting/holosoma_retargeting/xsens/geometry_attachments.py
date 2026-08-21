@@ -7,6 +7,7 @@ import numpy as np
 from holosoma_retargeting.data_utils.xsens_hdf5 import XsensHdf5Calibration
 from holosoma_retargeting.kinematics import MeshAttachment, PointSetAttachment
 from holosoma_retargeting.xsens.avatar_mesh import (
+    XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
     AvatarMeshPart,
     avatar_proportions_from_calibration,
     build_tennis_racket_meshes,
@@ -41,7 +42,10 @@ def build_xsens_avatar_mesh_attachments(
         if source_name != XSENS_RACKET_SOURCE_SEGMENT
     }
     if XSENS_RACKET_SOURCE_SEGMENT in calibration.segment_names:
-        attachments[TENNIS_RACKET_BODY] = tuple(_mesh_attachment(part) for part in build_tennis_racket_meshes())
+        attachments[TENNIS_RACKET_BODY] = tuple(
+            _mesh_attachment(part)
+            for part in build_tennis_racket_meshes(visual_offset_m=XSENS_TENNIS_RACKET_VISUAL_OFFSET_M)
+        )
     return attachments
 
 

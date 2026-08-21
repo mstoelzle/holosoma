@@ -148,6 +148,7 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
     proportions = g1_anthropometry_to_xsens_avatar_proportions(anthropometry)
     expected_palm_offset = proportions.landmarks_m["RightHand"]["pRightHandPalm"]
     np.testing.assert_allclose(expected_palm_offset, G1_XSENS_RACKET_GRIP_OFFSET_M, atol=1e-8)
+    assert expected_palm_offset[2] < 0.0
     np.testing.assert_allclose(
         bodies["TennisRacket"].reference_pose.translation_m,
         bodies["RightHand"].reference_pose.translation_m + expected_palm_offset,

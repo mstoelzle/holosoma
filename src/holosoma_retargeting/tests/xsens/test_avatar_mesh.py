@@ -6,8 +6,13 @@ from collections import OrderedDict
 from dataclasses import replace
 
 import numpy as np
+import pytest
 from holosoma_retargeting.transformation_utils import rotate_vector
 from holosoma_retargeting.xsens.avatar_mesh import (
+    G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
+    TENNIS_RACKET_GRIP_RADIUS_M,
+    TENNIS_RACKET_GRIP_SECTIONS,
+    XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
     build_tennis_racket_meshes,
     build_xsens_avatar_meshes,
     expected_racket_tpose_from_right_hand,
@@ -331,8 +336,46 @@ def test_racket_is_regulation_sized_and_valid() -> None:
     vertices = np.concatenate([part.mesh.vertices for part in racket_parts], axis=0)
 
     assert {part.name for part in racket_parts} == {"racket_grip", "racket_frame", "racket_strings"}
-    assert 0.66 < float(vertices[:, 0].max() - vertices[:, 0].min()) < 0.71
-    assert 0.25 < float(vertices[:, 2].max() - vertices[:, 2].min()) < 0.30
+    extents = vertices.max(axis=0) - vertices.min(axis=0)
+    np.testing.assert_allclose(extents[[0, 2]], [0.68896769, 0.28797704], atol=1e-7)
+    assert extents[0] <= 0.737  # ITF maximum overall racket length.
+    assert extents[2] <= 0.317  # ITF maximum overall racket width.
     grip = next(part.mesh for part in racket_parts if part.name == "racket_grip")
-    assert grip.bounds[0, 0] < 0.0 < grip.bounds[1, 0]
+    np.testing.assert_allclose(grip.bounds[:, 0], np.array([-0.09, 0.09]), atol=1e-8)
+    np.testing.assert_allclose(
+        grip.bounds[:, 1],
+        np.array([-TENNIS_RACKET_GRIP_RADIUS_M, TENNIS_RACKET_GRIP_RADIUS_M]),
+        atol=1e-8,
+    )
+    grip_perimeter_in = (
+        2.0
+        * TENNIS_RACKET_GRIP_SECTIONS
+        * TENNIS_RACKET_GRIP_RADIUS_M
+        * np.sin(np.pi / TENNIS_RACKET_GRIP_SECTIONS)
+        / 0.0254
+    )
+    assert grip_perimeter_in == pytest.approx(4.38, abs=0.01)
     assert all(np.isfinite(part.mesh.vertices).all() for part in racket_parts)
+
+
+@pytest.mark.parametrize(
+    "visual_offset_m",
+    [XSENS_TENNIS_RACKET_VISUAL_OFFSET_M, G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M],
+)
+def test_racket_visual_offset_is_an_explicit_rigid_translation(
+    visual_offset_m: tuple[float, float, float],
+) -> None:
+    nominal_parts = build_tennis_racket_meshes()
+    shifted_parts = build_tennis_racket_meshes(visual_offset_m=visual_offset_m)
+
+    for nominal, shifted in zip(nominal_parts, shifted_parts, strict=True):
+        assert nominal.name == shifted.name
+        expected_translation = np.broadcast_to(
+            np.asarray(visual_offset_m),
+            shifted.mesh.vertices.shape,
+        )
+        np.testing.assert_allclose(
+            shifted.mesh.vertices - nominal.mesh.vertices,
+            expected_translation,
+            atol=1e-12,
+        )

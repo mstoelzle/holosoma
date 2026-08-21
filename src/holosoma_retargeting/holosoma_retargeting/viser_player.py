@@ -113,7 +113,10 @@ G1_RACKET_ORIENTATION_LINK = G1_TENNIS_RACKET_ATTACHMENT.hand_link
 G1_RACKET_GRIP_OFFSET_M = G1_TENNIS_RACKET_ATTACHMENT.position_m
 G1_RACKET_FRAME_WXYZ = G1_TENNIS_RACKET_ATTACHMENT.quaternion_wxyz
 G1_HAND_TO_XSENS_FRAME_WXYZ = np.array([0.5, 0.5, -0.5, 0.5])
-G1_XSENS_RACKET_GRIP_OFFSET_M = np.array([0.02995738, -0.09651599, 0.01196775])
+# The G1-proportioned Xsens model's pRightHandPalm landmark, expressed first
+# in Xsens hand coordinates. This deprecated alias is not the physical G1
+# hand-to-racket attachment, which comes exclusively from the JSON artifact.
+G1_XSENS_RACKET_GRIP_OFFSET_M = np.array([0.02995738, -0.09651599, -0.01196775])
 XSENS_RACKET_LONGITUDINAL_ROLL_WXYZ = np.array([np.sqrt(0.5), -np.sqrt(0.5), 0.0, 0.0])
 
 
