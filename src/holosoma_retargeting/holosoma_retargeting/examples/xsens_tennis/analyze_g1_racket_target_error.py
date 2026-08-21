@@ -17,10 +17,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tyro
 from matplotlib import animation
-from matplotlib.axes import Axes
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from holosoma_retargeting.data_utils.xsens_hdf5 import load_xsens_hdf5_motion
+from holosoma_retargeting.examples.xsens_tennis.tennis_racket_plotting import draw_racket_pose
 from holosoma_retargeting.transformation_utils import rotations_from_wxyz
 from holosoma_retargeting.xsens.tennis_racket import (
     build_tennis_racket_targets,
@@ -225,26 +225,6 @@ def _plot_static(data: RacketTargetErrorAnalysis, config: Config, path: Path) ->
     plt.close(figure)
 
 
-def _draw_triad(
-    axis: Axes,
-    rotation: np.ndarray,
-    *,
-    linestyle: str,
-    label: str,
-) -> None:
-    colors = ("#D55E00", "#009E73", "#0072B2")
-    for direction, color in zip(rotation.T, colors, strict=True):
-        axis.plot(
-            [0.0, direction[0]],
-            [0.0, direction[1]],
-            [0.0, direction[2]],
-            color=color,
-            linestyle=linestyle,
-            linewidth=2.2,
-        )
-    axis.plot([], [], [], color="black", linestyle=linestyle, label=label)
-
-
 def _animation_frame_indices(data: RacketTargetErrorAnalysis, config: Config) -> np.ndarray:
     count = min(data.error_deg.size, max(2, round(config.animation_fps * config.animation_duration_s)))
     return np.unique(np.linspace(0, data.error_deg.size - 1, count, dtype=int))
@@ -257,7 +237,7 @@ def _create_animation(data: RacketTargetErrorAnalysis, config: Config, path: Pat
     grid = figure.add_gridspec(2, 2, width_ratios=(2.2, 1.0))
     overview = figure.add_subplot(grid[0, 0])
     local = figure.add_subplot(grid[1, 0])
-    triad = figure.add_subplot(grid[:, 1], projection="3d")
+    racket_axis = figure.add_subplot(grid[:, 1], projection="3d")
     time_min = data.times_s[overview_indices] / 60.0
     overview.plot(time_min, data.error_deg[overview_indices], color="#0072B2", linewidth=0.65)
     overview.axhline(config.entry_error_deg, color="#E69F00", linewidth=0.9)
@@ -285,17 +265,37 @@ def _create_animation(data: RacketTargetErrorAnalysis, config: Config, path: Pat
             max(float(data.times_s[0]), time_s - half_window), min(float(data.times_s[-1]), time_s + half_window)
         )
         local.set_ylim(0.0, max(90.0, float(np.max(data.error_deg[mask])) * 1.08))
-        triad.cla()
-        _draw_triad(triad, data.target_rotations[frame], linestyle="-", label="Nearest Xsens target")
-        _draw_triad(triad, data.achieved_rotations[frame], linestyle="--", label="Achieved G1 racket")
-        triad.set_xlim(-1.05, 1.05)
-        triad.set_ylim(-1.05, 1.05)
-        triad.set_zlim(-1.05, 1.05)
-        triad.set_box_aspect((1.0, 1.0, 1.0))
-        triad.set_xlabel("World X")
-        triad.set_ylabel("World Y")
-        triad.set_zlabel("World Z")
-        triad.legend(loc="upper left", fontsize=8)
+        racket_axis.cla()
+        origin = np.zeros(3)
+        draw_racket_pose(
+            racket_axis,
+            origin,
+            data.target_rotations[frame],
+            color="#6B7280",
+            linestyle="--",
+            label="Nearest Xsens target",
+            alpha=0.75,
+        )
+        draw_racket_pose(
+            racket_axis,
+            origin,
+            data.achieved_rotations[frame],
+            color="#E69F00",
+            linestyle="-",
+            label="Achieved G1 racket",
+            alpha=1.0,
+        )
+        racket_axis.scatter([0.0], [0.0], [0.0], color="#111827", s=18, label="Racket origin")
+        racket_axis.set_xlim(-0.68, 0.68)
+        racket_axis.set_ylim(-0.68, 0.68)
+        racket_axis.set_zlim(-0.68, 0.68)
+        racket_axis.set_box_aspect((1.0, 1.0, 1.0))
+        racket_axis.view_init(elev=23, azim=-58)
+        racket_axis.set_xlabel("World X [m]")
+        racket_axis.set_ylabel("World Y [m]")
+        racket_axis.set_zlabel("World Z [m]")
+        racket_axis.set_title("Racket orientation at a shared origin")
+        racket_axis.legend(loc="upper left", fontsize=8)
         status.set_text(
             f"t={time_s:.2f} s  |  error={data.error_deg[frame]:.1f}°  |  "
             f"state={data.tracking_state[frame]}  |  wrist margin={data.wrist_margin_deg[frame]:.1f}°  |  "

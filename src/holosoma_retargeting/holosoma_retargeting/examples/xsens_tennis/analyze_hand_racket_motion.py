@@ -24,6 +24,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from scipy.spatial.transform import Rotation
 
+from holosoma_retargeting.examples.xsens_tennis.tennis_racket_plotting import draw_racket_pose
 from holosoma_retargeting.transformation_utils import rotation_as_wxyz, rotations_from_wxyz
 
 HAND_SEGMENT = "RightHand"
@@ -1168,49 +1169,6 @@ def plot_sensor_crosscheck(result: AnalysisResult, output_dir: Path) -> None:
     _save_figure(figure, output_dir, "sensor_crosscheck")
 
 
-def _racket_local_lines() -> list[np.ndarray]:
-    shaft = np.array([[-0.09, 0.0, 0.0], [0.24, 0.0, 0.0]])
-    theta = np.linspace(0.0, 2.0 * np.pi, 80)
-    hoop = np.column_stack(
-        [
-            0.415 + 0.175 * np.cos(theta),
-            np.zeros(theta.size),
-            0.135 * np.sin(theta),
-        ]
-    )
-    throat_left = np.array([[0.18, 0.0, 0.0], [0.27, 0.0, 0.075]])
-    throat_right = np.array([[0.18, 0.0, 0.0], [0.27, 0.0, -0.075]])
-    return [shaft, hoop, throat_left, throat_right]
-
-
-def _transform_points(points: np.ndarray, origin: np.ndarray, rotation: Rotation) -> np.ndarray:
-    return rotation.apply(points) + origin
-
-
-def _draw_racket_pose(
-    axis: Axes,
-    origin: np.ndarray,
-    rotation: Rotation,
-    *,
-    color: str,
-    linestyle: str,
-    label: str,
-    alpha: float,
-) -> None:
-    for line_index, local_line in enumerate(_racket_local_lines()):
-        world_line = _transform_points(local_line, origin, rotation)
-        axis.plot(
-            world_line[:, 0],
-            world_line[:, 1],
-            world_line[:, 2],
-            color=color,
-            linestyle=linestyle,
-            linewidth=2.0 if line_index == 0 else 1.4,
-            alpha=alpha,
-            label=label if line_index == 0 else None,
-        )
-
-
 def _draw_triad(axis: Axes, origin: np.ndarray, rotation: Rotation, scale: float, alpha: float = 1.0) -> None:
     directions = rotation.as_matrix() * scale
     for direction, color, label in zip(directions.T, (RED, GREEN, BLUE), ("x", "y", "z"), strict=True):
@@ -1254,7 +1212,7 @@ def plot_orientation_keyframes(
     for plot_index, (time_s, label) in enumerate(zip(key_times, labels, strict=True), start=1):
         index = int(np.argmin(np.abs(result.sequence.times_s - time_s)))
         axis = figure.add_subplot(1, 4, plot_index, projection="3d")
-        _draw_racket_pose(
+        draw_racket_pose(
             axis,
             result.observed_translation_m,
             result.observed_rotation,
@@ -1263,7 +1221,7 @@ def plot_orientation_keyframes(
             label="Expected from observed T-pose",
             alpha=0.75,
         )
-        _draw_racket_pose(
+        draw_racket_pose(
             axis,
             result.relative_pose.translations_m[index],
             result.relative_pose.rotations[index],
@@ -1324,7 +1282,7 @@ def create_diagnostic_animation(
         current_time_s = result.sequence.times_s[sample_index]
 
         pose_axis.clear()
-        _draw_racket_pose(
+        draw_racket_pose(
             pose_axis,
             result.observed_translation_m,
             result.observed_rotation,
@@ -1333,7 +1291,7 @@ def create_diagnostic_animation(
             label="Expected from observed T-pose",
             alpha=0.72,
         )
-        _draw_racket_pose(
+        draw_racket_pose(
             pose_axis,
             result.relative_pose.translations_m[sample_index],
             result.relative_pose.rotations[sample_index],
