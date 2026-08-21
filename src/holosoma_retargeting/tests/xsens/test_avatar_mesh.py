@@ -379,3 +379,11 @@ def test_racket_visual_offset_is_an_explicit_rigid_translation(
             expected_translation,
             atol=1e-12,
         )
+
+
+def test_g1_xsens_racket_offset_preserves_mm_contact_calibration() -> None:
+    np.testing.assert_allclose(
+        G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
+        [0.0256, 0.0362, 0.0],
+        atol=1e-12,
+    )

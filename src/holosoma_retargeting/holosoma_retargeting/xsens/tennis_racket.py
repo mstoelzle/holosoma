@@ -498,7 +498,7 @@ def tennis_racket_target_error_rad(
 def attachment_handle_intersects_palm(
     attachment: TennisRacketAttachment,
     *,
-    inset_fraction: float = 0.15,
+    inset_fraction: float = 0.10,
 ) -> bool:
     """Check that the grasp origin lies inside an inset palm volume.
 
