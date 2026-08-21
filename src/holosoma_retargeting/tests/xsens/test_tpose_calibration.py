@@ -15,8 +15,10 @@ from holosoma_retargeting.examples.robot_retarget import create_task_constants
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 from holosoma_retargeting.src.mujoco_utils import evaluate_mujoco_frame_poses
 from holosoma_retargeting.xsens.orientation_tracking import (
+    ARM_DIRECTION_AXIS_NAMES,
     XSENS_AXIS_SPECS,
     build_xsens_axis_calibration_metadata,
+    build_xsens_orientation_targets,
     build_xsens_orientation_targets_from_calibration,
     load_xsens_orientation_targets,
     matrix_to_quat_wijk,
@@ -259,6 +261,89 @@ def test_orientation_tracking_jacobians_match_finite_difference() -> None:
     )
     body_axis_fd = (body_axis_eps - body_axis) / eps
     np.testing.assert_allclose(J_body_axis[:, ankle_pitch_q_idx], body_axis_fd, atol=1e-4)
+
+    elbow_id = mujoco.mj_name2id(
+        retargeter.robot_model,
+        mujoco.mjtObj.mjOBJ_JOINT,
+        "left_elbow_joint",
+    )
+    elbow_q_idx = int(retargeter.robot_model.jnt_qposadr[elbow_id])
+    q_bent = q.copy()
+    q_bent[elbow_q_idx] = 0.5
+    retargeter.robot_data.qpos[:] = q_bent
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    elbow_cosine, J_elbow_cosine = retargeter._elbow_bend_cosine_jacobian(
+        "left_shoulder_yaw_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+    )
+    q_eps = q_bent.copy()
+    q_eps[elbow_q_idx] += eps
+    retargeter.robot_data.qpos[:] = q_eps
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    elbow_cosine_eps, _ = retargeter._elbow_bend_cosine_jacobian(
+        "left_shoulder_yaw_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+    )
+    elbow_cosine_fd = (elbow_cosine_eps - elbow_cosine) / eps
+    np.testing.assert_allclose(J_elbow_cosine[elbow_q_idx], elbow_cosine_fd, atol=1e-4)
+
+
+def test_frame_and_bend_arm_targets_replace_directions_with_elbow_bend() -> None:
+    positions = _symmetric_tpose_positions()
+    quaternions = np.tile(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        (2, len(XSENS_BODY_SEGMENT_NAMES), 1),
+    )
+    axis_metadata = build_xsens_axis_calibration_metadata(
+        tpose_positions_m=positions,
+        tpose_quaternions_wijk=quaternions[0],
+    )
+    orientation_names = ["Left Upper Arm", "Right Upper Arm", "Left Hand", "Right Hand"]
+    orientation_links = [
+        "left_shoulder_yaw_link",
+        "right_shoulder_yaw_link",
+        "left_rubber_hand_link",
+        "right_rubber_hand_link",
+    ]
+    orientation_offsets = np.tile(
+        np.array([1.0, 0.0, 0.0, 0.0]),
+        (len(orientation_names), 1),
+    )
+    kwargs = {
+        "orientation_names": orientation_names,
+        "orientation_robot_link_names": orientation_links,
+        "orientation_offsets_wijk": orientation_offsets,
+        "axis_names": axis_metadata["axis_names"].tolist(),
+        "axis_xsens_segment_names": axis_metadata["axis_xsens_segment_names"].tolist(),
+        "axis_local_tpose_xyz": axis_metadata["axis_local_tpose_xyz"],
+        "axis_robot_start_link_names": axis_metadata["axis_robot_start_link_names"].tolist(),
+        "axis_robot_end_link_names": axis_metadata["axis_robot_end_link_names"].tolist(),
+        "axis_robot_local_vectors": axis_metadata["axis_robot_local_vectors"],
+        "axis_weights": axis_metadata["axis_weights"],
+        "motion_quaternions_wijk": quaternions,
+        "segment_names": XSENS_BODY_SEGMENT_NAMES,
+    }
+    baseline = build_xsens_orientation_targets(**kwargs)
+    frame_and_bend = build_xsens_orientation_targets(
+        **kwargs,
+        arm_orientation_mode="frame-and-bend",
+    )
+
+    assert not ARM_DIRECTION_AXIS_NAMES.intersection(frame_and_bend.axis_names)
+    assert frame_and_bend.elbow_bend_names == ["left_elbow_bend", "right_elbow_bend"]
+    assert {"Left Upper Arm", "Right Upper Arm"}.issubset(frame_and_bend.orientation_names)
+    baseline_axis_index = {name: idx for idx, name in enumerate(baseline.axis_names)}
+    expected_cosines = []
+    for side in ("left", "right"):
+        upper = baseline.axis_target_vectors[:, baseline_axis_index[f"{side}_upper_arm"]]
+        forearm = baseline.axis_target_vectors[:, baseline_axis_index[f"{side}_forearm"]]
+        expected_cosines.append(np.einsum("ti,ti->t", upper, forearm))
+    np.testing.assert_allclose(
+        frame_and_bend.elbow_bend_target_cosines,
+        np.stack(expected_cosines, axis=1),
+    )
 
 
 def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:

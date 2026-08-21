@@ -162,7 +162,16 @@ copied unchanged, then calibrated against the corresponding G1 link frames so to
 can be tracked during optimization. The fixed G1 head does not track independent Xsens head/neck rotation; head
 position remains part of the interaction mesh. Direct mode retains the previous human-height-scaled calibration.
 Supply an existing artifact with `--retargeter.orientation.calibration-path <calibration.npz>` to skip the in-memory
-calibration, or use `--xsens-morphology.no-track-orientations` for the position-only optimizer.
+calibration. Select the arm-orientation formulation with `--retargeter.orientation.arm-mode`: `longitudinal-axes` tracks the
+calibrated segment orientations and limb directions used by the established pipeline, `frame-and-bend` replaces the
+absolute arm-direction targets with full upper-arm orientation and scalar elbow-bend targets, and `off` uses only the
+position-based optimizer. The default `auto` mode resolves to `longitudinal-axes` for this G1-proportioned Xsens path
+and to `off` elsewhere.
+
+By default, each frame uses one full optimization stage. Use
+`--retargeter.optimization-schedule orientation-first` to prepend one orientation-only coarse solve, and set its
+iteration budget with `--retargeter.orientation-first-iterations 20`. The orientation formulation and optimization
+schedule are independent; either arm-orientation mode can use either schedule.
 
 For sparse debugging, `--motion-data-config.frame-indices 100 250 400` selects post-resampling frames and treats
 them as a uniformly timed storyboard. Use the same indices in `viser_player.py` with `--xsens-target-fps 30` and

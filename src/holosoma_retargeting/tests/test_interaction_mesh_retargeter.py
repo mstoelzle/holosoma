@@ -14,7 +14,7 @@ from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
     OrientationTrackingConfig,
-    StagedOptimizationConfig,
+    RetargeterConfig,
 )
 from holosoma_retargeting.config_types.robot import RobotConfig
 from holosoma_retargeting.config_types.task import TaskConfig
@@ -49,6 +49,7 @@ def _orientation_targets(
     *,
     orientation_names: list[str] | None = None,
     axis_names: list[str] | None = None,
+    include_elbow_bend: bool = False,
 ) -> XsensOrientationTargets:
     orientation_names = ["Right Hand"] if orientation_names is None else orientation_names
     axis_names = ["right_upper_arm"] if axis_names is None else axis_names
@@ -72,17 +73,86 @@ def _orientation_targets(
             (num_frames, axis_count, 3),
         ).copy(),
         axis_weights=np.ones(axis_count),
+        elbow_bend_names=["right_elbow_bend"] if include_elbow_bend else [],
+        elbow_bend_robot_shoulder_link_names=(["right_shoulder_yaw_link"] if include_elbow_bend else []),
+        elbow_bend_robot_elbow_link_names=["right_elbow_link"] if include_elbow_bend else [],
+        elbow_bend_robot_wrist_link_names=(["right_wrist_yaw_link"] if include_elbow_bend else []),
+        elbow_bend_target_cosines=(
+            np.ones((num_frames, 1), dtype=float) if include_elbow_bend else np.zeros((num_frames, 0), dtype=float)
+        ),
+        elbow_bend_weights=np.ones(1 if include_elbow_bend else 0, dtype=float),
     )
 
 
-def _motion_retargeter(*, staged: bool) -> InteractionMeshRetargeter:
+def _frame_and_bend_arm_targets(
+    num_frames: int,
+    *,
+    include_elbow_bends: bool = True,
+    retain_arm_axis: bool = False,
+) -> XsensOrientationTargets:
+    axis_names = ["left_foot_forward"]
+    axis_segments = ["Left Foot"]
+    axis_start_links = ["left_ankle_roll_link"]
+    axis_end_links = [""]
+    axis_local_vectors = [[1.0, 0.0, 0.0]]
+    if retain_arm_axis:
+        axis_names.append("right_forearm")
+        axis_segments.append("Right Forearm")
+        axis_start_links.append("right_elbow_link")
+        axis_end_links.append("right_wrist_yaw_link")
+        axis_local_vectors.append([0.0, 0.0, 0.0])
+    elbow_names = ["left_elbow_bend", "right_elbow_bend"] if include_elbow_bends else []
+    return XsensOrientationTargets(
+        orientation_names=["Left Upper Arm", "Right Upper Arm", "Left Hand", "Right Hand"],
+        orientation_robot_link_names=[
+            "left_shoulder_yaw_link",
+            "right_shoulder_yaw_link",
+            "left_rubber_hand_link",
+            "right_rubber_hand_link",
+        ],
+        orientation_offsets_wijk=np.tile(np.array([[1.0, 0.0, 0.0, 0.0]]), (4, 1)),
+        orientation_target_rotations=np.broadcast_to(
+            np.eye(3),
+            (num_frames, 4, 3, 3),
+        ).copy(),
+        axis_names=axis_names,
+        axis_xsens_segment_names=axis_segments,
+        axis_robot_start_link_names=axis_start_links,
+        axis_robot_end_link_names=axis_end_links,
+        axis_robot_local_vectors=np.asarray(axis_local_vectors, dtype=float),
+        axis_target_vectors=np.broadcast_to(
+            np.array([1.0, 0.0, 0.0]),
+            (num_frames, len(axis_names), 3),
+        ).copy(),
+        axis_weights=np.ones(len(axis_names)),
+        elbow_bend_names=elbow_names,
+        elbow_bend_robot_shoulder_link_names=(
+            ["left_shoulder_yaw_link", "right_shoulder_yaw_link"] if include_elbow_bends else []
+        ),
+        elbow_bend_robot_elbow_link_names=(["left_elbow_link", "right_elbow_link"] if include_elbow_bends else []),
+        elbow_bend_robot_wrist_link_names=(
+            ["left_wrist_yaw_link", "right_wrist_yaw_link"] if include_elbow_bends else []
+        ),
+        elbow_bend_target_cosines=(
+            np.ones((num_frames, 2), dtype=float) if include_elbow_bends else np.zeros((num_frames, 0), dtype=float)
+        ),
+        elbow_bend_weights=np.ones(2 if include_elbow_bends else 0, dtype=float),
+    )
+
+
+def _motion_retargeter(
+    *,
+    optimization_schedule: str,
+    arm_orientation_mode: str = "longitudinal-axes",
+) -> InteractionMeshRetargeter:
     retargeter = object.__new__(InteractionMeshRetargeter)
     retargeter.nq = 10
     retargeter.q_a_indices = np.array([0, 1], dtype=int)
     retargeter.object_name = "ground"
     retargeter.smplh_mapped_joint_indices = np.array([0], dtype=int)
-    retargeter.orientation_config = OrientationTrackingConfig(enable=True)
-    retargeter.staged_optimization = StagedOptimizationConfig(enable=staged, iterations=4)
+    retargeter.orientation_config = OrientationTrackingConfig(arm_mode=arm_orientation_mode)
+    retargeter.optimization_schedule = optimization_schedule
+    retargeter.orientation_first_iterations = 4
     retargeter.w_nominal_tracking_init = 5.0
     retargeter.nominal_tracking_tau = 10.0
     retargeter.initial_iterations = 3
@@ -220,25 +290,26 @@ def test_foot_lock_windows_return_per_window_floor_height() -> None:
     assert retargeter._is_foot_locked_in_window("torso_link", 15) is None
 
 
-def test_staged_optimization_defaults_to_minimal_disabled_schedule() -> None:
-    config = StagedOptimizationConfig()
+def test_optimization_schedule_defaults_to_single_stage() -> None:
+    config = RetargeterConfig()
 
-    assert config.enable is False
-    assert config.iterations == 20
+    assert config.optimization_schedule == "single-stage"
+    assert config.orientation_first_iterations == 20
+    assert config.orientation.arm_mode == "auto"
 
 
 @pytest.mark.parametrize("iterations", [0, -1])
-def test_staged_optimization_rejects_non_positive_iterations(iterations: int) -> None:
+def test_orientation_first_schedule_rejects_non_positive_iterations(iterations: int) -> None:
     with pytest.raises(ValueError, match="iterations"):
-        StagedOptimizationConfig(iterations=iterations)
+        RetargeterConfig(orientation_first_iterations=iterations)
 
 
-def test_disabled_staging_keeps_single_full_solve_and_warm_start(
+def test_single_stage_schedule_keeps_one_full_solve_and_warm_start(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     result, calls = _run_stub_motion(
-        _motion_retargeter(staged=False),
+        _motion_retargeter(optimization_schedule="single-stage"),
         monkeypatch,
         tmp_path,
         _orientation_targets(2),
@@ -254,15 +325,16 @@ def test_disabled_staging_keeps_single_full_solve_and_warm_start(
     np.testing.assert_allclose(result[:, :2], [[10.0, 10.0], [20.0, 20.0]])
 
 
-def test_staging_runs_neutral_free_coarse_then_full_and_propagates_refined_result(
+def test_orientation_first_runs_coarse_then_full_and_propagates_refined_result(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    targets = _orientation_targets(2)
     result, calls = _run_stub_motion(
-        _motion_retargeter(staged=True),
+        _motion_retargeter(optimization_schedule="orientation-first"),
         monkeypatch,
         tmp_path,
-        _orientation_targets(2),
+        targets,
     )
 
     assert len(calls) == 4
@@ -272,11 +344,13 @@ def test_staging_runs_neutral_free_coarse_then_full_and_propagates_refined_resul
         assert "q_a_nominal" not in coarse
         assert "w_nominal_tracking" not in coarse
         assert coarse["n_iter"] == 4
+        assert coarse["orientation_targets"] is targets
     for full in (full_0, full_1):
         assert full.get("include_position_tracking", True) is True
         assert full["q_a_nominal"] is None
         assert full["w_nominal_tracking"] == pytest.approx(5.0)
         assert full["n_iter"] == 4
+        assert full["orientation_targets"] is targets
 
     np.testing.assert_allclose(coarse_0["q_n"][:2], [0.0, 0.0])
     np.testing.assert_allclose(coarse_0["q_t_last"][:2], [0.0, 0.0])
@@ -296,12 +370,12 @@ def test_staging_runs_neutral_free_coarse_then_full_and_propagates_refined_resul
         (_orientation_targets(1, axis_names=[]), "segment-axis"),
     ],
 )
-def test_staging_requires_full_orientation_and_axis_targets(
+def test_orientation_first_requires_full_orientation_and_axis_targets(
     targets: XsensOrientationTargets,
     message: str,
     tmp_path: Path,
 ) -> None:
-    retargeter = _motion_retargeter(staged=True)
+    retargeter = _motion_retargeter(optimization_schedule="orientation-first")
 
     with pytest.raises(ValueError, match=message):
         retargeter.retarget_motion(
@@ -315,6 +389,69 @@ def test_staging_requires_full_orientation_and_axis_targets(
             orientation_targets=targets,
             dest_res_path=tmp_path / "unused.npz",
         )
+
+
+@pytest.mark.parametrize(
+    ("targets", "message"),
+    [
+        (
+            _orientation_targets(1, orientation_names=["Left Hand", "Right Hand"]),
+            "full-orientation targets for both upper arms",
+        ),
+        (
+            _frame_and_bend_arm_targets(1, include_elbow_bends=False),
+            "elbow-bend targets for both arms",
+        ),
+        (
+            _frame_and_bend_arm_targets(1, retain_arm_axis=True),
+            "must replace, rather than supplement",
+        ),
+    ],
+)
+def test_frame_and_bend_mode_rejects_incomplete_or_redundant_targets(
+    targets: XsensOrientationTargets,
+    message: str,
+    tmp_path: Path,
+) -> None:
+    retargeter = _motion_retargeter(
+        optimization_schedule="single-stage",
+        arm_orientation_mode="frame-and-bend",
+    )
+
+    with pytest.raises(ValueError, match=message):
+        retargeter.retarget_motion(
+            human_joint_motions=np.zeros((1, 1, 3)),
+            object_poses=np.zeros((1, 7)),
+            object_poses_augmented=np.zeros((1, 7)),
+            object_points_local_demo=np.zeros((1, 3)),
+            object_points_local=np.zeros((1, 3)),
+            foot_sticking_sequences=[{"left": False, "right": False}],
+            q_a_init=np.zeros(2),
+            orientation_targets=targets,
+            dest_res_path=tmp_path / "unused.npz",
+        )
+
+
+def test_frame_and_bend_targets_are_shared_by_both_stages(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    targets = _frame_and_bend_arm_targets(1)
+    _, calls = _run_stub_motion(
+        _motion_retargeter(
+            optimization_schedule="orientation-first",
+            arm_orientation_mode="frame-and-bend",
+        ),
+        monkeypatch,
+        tmp_path,
+        targets,
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["include_position_tracking"] is False
+    assert calls[1].get("include_position_tracking", True) is True
+    assert calls[0]["orientation_targets"] is targets
+    assert calls[1]["orientation_targets"] is targets
 
 
 def test_coarse_solve_excludes_position_tracking_but_keeps_orientation_terms(
@@ -380,6 +517,65 @@ def test_coarse_solve_excludes_position_tracking_but_keeps_orientation_terms(
     # Q-diagonal regularization + temporal smoothness + full orientation + axis.
     # The three retained constraints are lower limits, upper limits, and step size.
     assert problem_shapes == [(4, 3)]
+    assert np.isfinite(cost)
+
+
+def test_elbow_bend_remains_active_without_position_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    robot_urdf = str(MODEL_DIR / "g1_29dof.urdf")
+    constants = create_task_constants(
+        robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
+        motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
+        task_config=TaskConfig(),
+        task_type="robot_only",
+    )
+    retargeter = InteractionMeshRetargeter(
+        task_constants=constants,
+        object_urdf_path=None,
+        activate_foot_sticking=False,
+        activate_obj_non_penetration=False,
+    )
+    q = retargeter.robot_model.qpos0.copy()
+    targets = _orientation_targets(1, include_elbow_bend=True)
+    retargeter.robot_data.qpos[:] = q
+    mujoco.mj_forward(retargeter.robot_model, retargeter.robot_data)
+    _, hand_rotation, _ = retargeter._frame_pose("right_rubber_hand_link")
+    upper_arm_axis, _ = retargeter._axis_jacobian("right_shoulder_yaw_link", "right_elbow_link")
+    elbow_cosine, _ = retargeter._elbow_bend_cosine_jacobian(
+        "right_shoulder_yaw_link", "right_elbow_link", "right_wrist_yaw_link"
+    )
+    targets.orientation_target_rotations[0, 0] = hand_rotation
+    targets.axis_target_vectors[0, 0] = upper_arm_axis
+    targets.elbow_bend_target_cosines[0, 0] = elbow_cosine
+
+    orientation_term_counts: list[int] = []
+    original_orientation_terms = retargeter._orientation_tracking_objective_terms
+
+    def tracked_orientation_terms(*args, **kwargs):
+        terms = original_orientation_terms(*args, **kwargs)
+        orientation_term_counts.append(len(terms))
+        return terms
+
+    def fail_if_position_tracking_is_built(*_args, **_kwargs):
+        raise AssertionError("coarse solve constructed the positional objective")
+
+    monkeypatch.setattr(retargeter, "_orientation_tracking_objective_terms", tracked_orientation_terms)
+    monkeypatch.setattr(retargeter_module, "calculate_laplacian_matrix", fail_if_position_tracking_is_built)
+
+    _, cost = retargeter.solve_single_iteration(
+        q_locked=q,
+        q_a_n_last=q[retargeter.q_a_indices],
+        q_t_last=q,
+        target_laplacian=np.zeros((0, 3)),
+        adj_list=[],
+        obj_pts_local=np.zeros((0, 3)),
+        foot_sticking={"left": False, "right": False},
+        orientation_targets=targets,
+        include_position_tracking=False,
+    )
+
+    assert orientation_term_counts == [3]
     assert np.isfinite(cost)
 
 

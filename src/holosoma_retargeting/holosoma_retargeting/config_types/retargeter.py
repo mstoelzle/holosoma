@@ -4,6 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal, TypeAlias
+
+ArmOrientationTrackingMode: TypeAlias = Literal["auto", "off", "longitudinal-axes", "frame-and-bend"]
+"""Available arm-orientation target formulations.
+
+``auto`` preserves the context-dependent Xsens-to-G1 default and is resolved
+before the retargeter is constructed.
+"""
+
+OptimizationSchedule: TypeAlias = Literal["single-stage", "orientation-first"]
+"""Available per-frame optimization schedules."""
 
 
 @dataclass(frozen=True)
@@ -48,10 +59,16 @@ class SelfCollisionConfig:
 
 @dataclass(frozen=True)
 class OrientationTrackingConfig:
-    """Configuration for additive Xsens orientation and segment-axis tracking."""
+    """Configuration for Xsens orientation tracking."""
 
-    enable: bool = False
-    """Whether to enable orientation-aware retargeting costs."""
+    arm_mode: ArmOrientationTrackingMode = "auto"
+    """Arm-orientation target formulation.
+
+    ``auto`` enables ``longitudinal-axes`` for the supported Xsens-to-G1
+    morphology-adaptation path and otherwise resolves to ``off``.
+    ``frame-and-bend`` tracks full upper-arm frames, elbow bend, and hand
+    orientations instead of absolute forearm directions.
+    """
 
     calibration_path: Path | None = None
     """Path to the Xsens T-pose calibration artifact used for orientation/axis correspondences."""
@@ -65,26 +82,15 @@ class OrientationTrackingConfig:
     orientation_error_clip_rad: float = 0.7
     """Maximum rotation-vector magnitude used by orientation residuals."""
 
-
-@dataclass(frozen=True)
-class StagedOptimizationConfig:
-    """Configuration for an optional orientation-first solve.
-
-    The coarse stage uses the preceding accepted frame as its initialization and
-    temporal reference. It retains the regularization, orientation, segment-axis,
-    and constraint terms while dropping only positional interaction-mesh tracking.
-    The normal full objective then refines the coarse result.
-    """
-
-    enable: bool = False
-    """Whether to use the orientation-first schedule on every frame."""
-
-    iterations: int = 20
-    """Coarse SQP iterations and the minimum full-refinement iteration budget."""
-
     def __post_init__(self) -> None:
-        if self.iterations <= 0:
-            raise ValueError("staged_optimization.iterations must be positive")
+        if self.arm_mode not in {"auto", "off", "longitudinal-axes", "frame-and-bend"}:
+            raise ValueError(f"Unsupported arm-orientation mode: {self.arm_mode}")
+
+    @property
+    def is_enabled(self) -> bool:
+        """Whether the resolved configuration supplies orientation objectives."""
+
+        return self.arm_mode in {"longitudinal-axes", "frame-and-bend"}
 
 
 @dataclass(frozen=True)
@@ -136,13 +142,22 @@ class RetargeterConfig:
     """Configuration for self-collision avoidance."""
 
     orientation: OrientationTrackingConfig = field(default_factory=OrientationTrackingConfig)
-    """Configuration for optional Xsens orientation and segment-axis tracking."""
+    """Xsens orientation-target formulation and weights."""
 
-    staged_optimization: StagedOptimizationConfig = field(default_factory=StagedOptimizationConfig)
-    """Optional orientation-first optimization schedule."""
+    optimization_schedule: OptimizationSchedule = "single-stage"
+    """Per-frame solve schedule."""
+
+    orientation_first_iterations: int = 20
+    """Coarse-stage iterations and minimum final-stage budget when orientation-first."""
 
     w_nominal_tracking_init: float = 5.0
     """Initial weight for nominal tracking cost."""
 
     nominal_tracking_tau: float = 1e6
     """Time constant for the nominal tracking cost."""
+
+    def __post_init__(self) -> None:
+        if self.optimization_schedule not in {"single-stage", "orientation-first"}:
+            raise ValueError(f"Unsupported optimization schedule: {self.optimization_schedule}")
+        if self.orientation_first_iterations <= 0:
+            raise ValueError("orientation_first_iterations must be positive")

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol, TypeAlias
 
 import numpy as np
 from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from holosoma_retargeting.config_types.data_type import XSENS_DEMO_JOINTS
+
+ActiveArmOrientationTrackingMode: TypeAlias = Literal["longitudinal-axes", "frame-and-bend"]
+"""Arm-orientation modes that construct Xsens targets."""
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,19 @@ class XsensAxisSpec:
 
 
 @dataclass(frozen=True)
+class XsensElbowBendSpec:
+    """Specification for one scalar elbow-bend target."""
+
+    name: str
+    upper_arm_axis_name: str
+    forearm_axis_name: str
+    robot_shoulder_link: str
+    robot_elbow_link: str
+    robot_wrist_link: str
+    weight: float = 1.0
+
+
+@dataclass(frozen=True)
 class XsensOrientationTargets:
     """Per-frame orientation and segment-axis targets for retargeting."""
 
@@ -48,6 +64,12 @@ class XsensOrientationTargets:
     axis_robot_local_vectors: np.ndarray
     axis_target_vectors: np.ndarray
     axis_weights: np.ndarray
+    elbow_bend_names: list[str] = field(default_factory=list)
+    elbow_bend_robot_shoulder_link_names: list[str] = field(default_factory=list)
+    elbow_bend_robot_elbow_link_names: list[str] = field(default_factory=list)
+    elbow_bend_robot_wrist_link_names: list[str] = field(default_factory=list)
+    elbow_bend_target_cosines: np.ndarray = field(default_factory=lambda: np.zeros((0, 0), dtype=float))
+    elbow_bend_weights: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=float))
 
 
 class XsensOrientationCalibration(Protocol):
@@ -201,6 +223,36 @@ XSENS_AXIS_SPECS = (
     ),
 )
 
+ARM_DIRECTION_AXIS_NAMES = frozenset(
+    {
+        "left_upper_arm",
+        "right_upper_arm",
+        "left_forearm",
+        "right_forearm",
+    }
+)
+
+FRAME_AND_BEND_ELBOW_BEND_SPECS = (
+    XsensElbowBendSpec(
+        "left_elbow_bend",
+        "left_upper_arm",
+        "left_forearm",
+        "left_shoulder_yaw_link",
+        "left_elbow_link",
+        "left_wrist_yaw_link",
+    ),
+    XsensElbowBendSpec(
+        "right_elbow_bend",
+        "right_upper_arm",
+        "right_forearm",
+        "right_shoulder_yaw_link",
+        "right_elbow_link",
+        "right_wrist_yaw_link",
+    ),
+)
+
+FRAME_AND_BEND_UPPER_ARM_ORIENTATION_NAMES = frozenset({"Left Upper Arm", "Right Upper Arm"})
+
 
 def normalize_vector(vector: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
     """Normalize a vector with a deterministic fallback for degenerate inputs."""
@@ -286,8 +338,12 @@ def build_xsens_orientation_targets(
     axis_weights: np.ndarray,
     motion_quaternions_wijk: np.ndarray,
     segment_names: list[str],
+    arm_orientation_mode: ActiveArmOrientationTrackingMode = "longitudinal-axes",
 ) -> XsensOrientationTargets:
     """Create dynamic orientation and axis targets from calibration metadata."""
+
+    if arm_orientation_mode not in {"longitudinal-axes", "frame-and-bend"}:
+        raise ValueError(f"Unsupported active arm-orientation mode: {arm_orientation_mode}")
 
     motion_quaternions = np.asarray(motion_quaternions_wijk, dtype=float)
     if motion_quaternions.ndim != 3 or motion_quaternions.shape[-1] != 4:
@@ -341,6 +397,49 @@ def build_xsens_orientation_targets(
         norms = np.linalg.norm(axis_targets[:, axis_idx], axis=-1, keepdims=True)
         axis_targets[:, axis_idx] = axis_targets[:, axis_idx] / np.maximum(norms, 1e-12)
 
+    elbow_bend_names: list[str] = []
+    elbow_bend_robot_shoulder_link_names: list[str] = []
+    elbow_bend_robot_elbow_link_names: list[str] = []
+    elbow_bend_robot_wrist_link_names: list[str] = []
+    elbow_bend_target_cosines = np.zeros((motion_quaternions.shape[0], 0), dtype=float)
+    elbow_bend_weights = np.zeros(0, dtype=float)
+
+    if arm_orientation_mode == "frame-and-bend":
+        missing_orientations = sorted(FRAME_AND_BEND_UPPER_ARM_ORIENTATION_NAMES.difference(orientation_names))
+        if missing_orientations:
+            raise ValueError(f"frame-and-bend requires calibrated full-orientation targets for {missing_orientations}")
+
+        axis_index = {name: idx for idx, name in enumerate(axis_names)}
+        missing_axes = sorted(ARM_DIRECTION_AXIS_NAMES.difference(axis_index))
+        if missing_axes:
+            raise ValueError(
+                f"frame-and-bend requires the calibrated arm directions used to construct elbow bend: {missing_axes}"
+            )
+
+        target_cosines = []
+        for spec in FRAME_AND_BEND_ELBOW_BEND_SPECS:
+            upper = axis_targets[:, axis_index[spec.upper_arm_axis_name]]
+            forearm = axis_targets[:, axis_index[spec.forearm_axis_name]]
+            target_cosines.append(np.einsum("ti,ti->t", upper, forearm))
+            elbow_bend_names.append(spec.name)
+            elbow_bend_robot_shoulder_link_names.append(spec.robot_shoulder_link)
+            elbow_bend_robot_elbow_link_names.append(spec.robot_elbow_link)
+            elbow_bend_robot_wrist_link_names.append(spec.robot_wrist_link)
+        elbow_bend_target_cosines = np.stack(target_cosines, axis=1)
+        elbow_bend_weights = np.asarray(
+            [spec.weight for spec in FRAME_AND_BEND_ELBOW_BEND_SPECS],
+            dtype=float,
+        )
+
+        retained_axis_indices = [idx for idx, name in enumerate(axis_names) if name not in ARM_DIRECTION_AXIS_NAMES]
+        axis_names = [axis_names[idx] for idx in retained_axis_indices]
+        axis_xsens_segment_names = [axis_xsens_segment_names[idx] for idx in retained_axis_indices]
+        axis_robot_start_link_names = [axis_robot_start_link_names[idx] for idx in retained_axis_indices]
+        axis_robot_end_link_names = [axis_robot_end_link_names[idx] for idx in retained_axis_indices]
+        robot_local_vectors = robot_local_vectors[retained_axis_indices]
+        axis_targets = axis_targets[:, retained_axis_indices]
+        axis_weights = np.asarray(axis_weights, dtype=float)[retained_axis_indices]
+
     return XsensOrientationTargets(
         orientation_names=orientation_names,
         orientation_robot_link_names=orientation_robot_link_names,
@@ -353,6 +452,12 @@ def build_xsens_orientation_targets(
         axis_robot_local_vectors=robot_local_vectors,
         axis_target_vectors=axis_targets,
         axis_weights=np.asarray(axis_weights, dtype=float),
+        elbow_bend_names=elbow_bend_names,
+        elbow_bend_robot_shoulder_link_names=elbow_bend_robot_shoulder_link_names,
+        elbow_bend_robot_elbow_link_names=elbow_bend_robot_elbow_link_names,
+        elbow_bend_robot_wrist_link_names=elbow_bend_robot_wrist_link_names,
+        elbow_bend_target_cosines=elbow_bend_target_cosines,
+        elbow_bend_weights=elbow_bend_weights,
     )
 
 
@@ -361,6 +466,7 @@ def build_xsens_orientation_targets_from_calibration(
     *,
     motion_quaternions_wijk: np.ndarray,
     segment_names: list[str],
+    arm_orientation_mode: ActiveArmOrientationTrackingMode = "longitudinal-axes",
 ) -> XsensOrientationTargets:
     """Create motion targets from shared Xsens orientation-calibration metadata."""
 
@@ -377,6 +483,7 @@ def build_xsens_orientation_targets_from_calibration(
         axis_weights=calibration.axis_weights,
         motion_quaternions_wijk=motion_quaternions_wijk,
         segment_names=segment_names,
+        arm_orientation_mode=arm_orientation_mode,
     )
 
 
@@ -385,6 +492,7 @@ def load_xsens_orientation_targets(
     calibration_path: str | Path,
     motion_quaternions_wijk: np.ndarray,
     segment_names: list[str],
+    arm_orientation_mode: ActiveArmOrientationTrackingMode = "longitudinal-axes",
 ) -> XsensOrientationTargets:
     """Load a calibration artifact and create per-frame orientation/axis targets."""
     calibration_path = Path(calibration_path)
@@ -424,4 +532,5 @@ def load_xsens_orientation_targets(
             axis_weights=np.asarray(data["axis_weights"], dtype=float),
             motion_quaternions_wijk=motion_quaternions_wijk,
             segment_names=segment_names,
+            arm_orientation_mode=arm_orientation_mode,
         )

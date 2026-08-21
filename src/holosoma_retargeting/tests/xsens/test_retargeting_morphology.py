@@ -46,27 +46,28 @@ def test_xsens_morphology_defaults_to_g1_proportioned_dynamic_grounding() -> Non
     assert config.root_motion.ground_height_m is None
     assert config.preserve_joint_offsets is False
     assert config.g1_model_path is None
-    assert config.track_orientations is True
 
 
 def test_g1_proportioned_xsens_enables_orientation_tracking_by_default() -> None:
-    resolved = robot_retarget.resolve_orientation_tracking_config(
+    resolved = robot_retarget.resolve_arm_orientation_mode(
         retargeter_config=RetargeterConfig(),
         morphology_config=XsensMorphologyConfig(),
         data_format="xsens",
         task_type="robot_only",
         robot="g1",
     )
-    disabled = robot_retarget.resolve_orientation_tracking_config(
-        retargeter_config=RetargeterConfig(),
-        morphology_config=XsensMorphologyConfig(track_orientations=False),
+    disabled = robot_retarget.resolve_arm_orientation_mode(
+        retargeter_config=RetargeterConfig(
+            orientation=OrientationTrackingConfig(arm_mode="off"),
+        ),
+        morphology_config=XsensMorphologyConfig(),
         data_format="xsens",
         task_type="robot_only",
         robot="g1",
     )
 
-    assert resolved.orientation.enable is True
-    assert disabled.orientation.enable is False
+    assert resolved.orientation.arm_mode == "longitudinal-axes"
+    assert disabled.orientation.arm_mode == "off"
 
 
 def _retargeter_summary_stub():
@@ -85,7 +86,8 @@ def _retargeter_summary_stub():
         _self_collision_config=SimpleNamespace(enable=False),
         step_size=0.2,
         orientation_config=RetargeterConfig().orientation,
-        staged_optimization=RetargeterConfig().staged_optimization,
+        optimization_schedule=RetargeterConfig().optimization_schedule,
+        orientation_first_iterations=RetargeterConfig().orientation_first_iterations,
     )
 
 
@@ -115,7 +117,7 @@ def test_retargeting_summary_lists_active_objectives_and_rotation_offsets() -> N
     assert "[active] interaction-mesh positional/relational tracking" in summary
     assert "[active] full segment-orientation tracking" in summary
     assert "[active] segment-axis direction tracking" in summary
-    assert "[inactive] orientation-first stage (iterations=20)" in summary
+    assert "[inactive] orientation-first optimization stage (iterations=20)" in summary
     assert "R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset" in summary
     assert "Left Hand -> left_rubber_hand_link" in summary
     assert "offset_wxyz=(+0.500000, +0.500000, +0.500000, +0.500000)" in summary
@@ -182,7 +184,11 @@ def test_g1_mode_uses_robot_xml_and_disables_uniform_rescaling(monkeypatch) -> N
     assert captured["root_motion"] == XsensMorphologyConfig().root_motion
 
 
-def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(monkeypatch) -> None:
+@pytest.mark.parametrize("arm_orientation_mode", ["longitudinal-axes", "frame-and-bend"])
+def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(
+    monkeypatch,
+    arm_orientation_mode: str,
+) -> None:
     motion = _motion()
     body_count = len(XSENS_BODY_SEGMENT_NAMES)
     adapted_tpose = XsensHdf5Tpose(
@@ -216,7 +222,7 @@ def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(monkeypatch)
     monkeypatch.setattr(robot_retarget, "build_xsens_orientation_targets_from_calibration", fake_build)
 
     result = robot_retarget.load_orientation_targets_for_retargeting(
-        orientation_config=OrientationTrackingConfig(enable=True),
+        orientation_config=OrientationTrackingConfig(arm_mode=arm_orientation_mode),
         robot_config=RobotConfig(robot_type="g1", robot_urdf_file="models/g1/custom.urdf"),
         robot="g1",
         data_format="xsens",
@@ -236,6 +242,14 @@ def test_g1_mode_calibrates_orientations_from_g1_proportioned_tpose(monkeypatch)
     assert captured["solve_tpose"] is adapted_tpose
     assert captured["position_scale_factor"] == 1.0
     assert captured["build_calibration"] is sentinel_calibration
+    assert captured["build"]["arm_orientation_mode"] == arm_orientation_mode
+    candidate_mapping = captured["solve_config"].candidate_orientation_mapping
+    if arm_orientation_mode == "frame-and-bend":
+        assert candidate_mapping["Left Upper Arm"] == "left_shoulder_yaw_link"
+        assert candidate_mapping["Right Upper Arm"] == "right_shoulder_yaw_link"
+    else:
+        assert "Left Upper Arm" not in candidate_mapping
+        assert "Right Upper Arm" not in candidate_mapping
 
 
 def test_direct_mode_retains_human_scaled_orientation_calibration(monkeypatch) -> None:
@@ -261,7 +275,7 @@ def test_direct_mode_retains_human_scaled_orientation_calibration(monkeypatch) -
     )
 
     result = robot_retarget.load_orientation_targets_for_retargeting(
-        orientation_config=OrientationTrackingConfig(enable=True),
+        orientation_config=OrientationTrackingConfig(arm_mode="longitudinal-axes"),
         robot_config=RobotConfig(robot_type="g1"),
         robot="g1",
         data_format="xsens",
@@ -331,3 +345,21 @@ def test_tyro_parses_nested_root_motion_configuration() -> None:
     assert config.xsens_morphology.root_motion.mode == "scale_by_leg_length_contact_aware"
     assert config.xsens_morphology.root_motion.ground_height_m == pytest.approx(0.12)
     assert config.xsens_morphology.root_motion.contact_height_tolerance_m == pytest.approx(0.04)
+
+
+def test_tyro_parses_arm_orientation_mode_and_optimization_schedule() -> None:
+    config = tyro.cli(
+        RetargetingConfig,
+        args=[
+            "--retargeter.orientation.arm-mode",
+            "frame-and-bend",
+            "--retargeter.optimization-schedule",
+            "orientation-first",
+            "--retargeter.orientation-first-iterations",
+            "24",
+        ],
+    )
+
+    assert config.retargeter.orientation.arm_mode == "frame-and-bend"
+    assert config.retargeter.optimization_schedule == "orientation-first"
+    assert config.retargeter.orientation_first_iterations == 24

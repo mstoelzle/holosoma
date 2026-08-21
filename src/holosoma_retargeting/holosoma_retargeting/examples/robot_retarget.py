@@ -68,6 +68,8 @@ from holosoma_retargeting.xsens.orientation_tracking import (  # noqa: E402
     load_xsens_orientation_targets,
 )
 from holosoma_retargeting.xsens.tpose_calibration import (  # noqa: E402
+    CANDIDATE_ORIENTATION_MAPPING,
+    FRAME_AND_BEND_ARM_ORIENTATION_MAPPING,
     XsensTposeCalibrationConfig,
     solve_xsens_tpose_calibration,
     solve_xsens_tpose_calibration_from_data,
@@ -225,9 +227,7 @@ def validate_xsens_morphology_selection(
         return
     if config.mode == "direct":
         if config.root_motion.mode != "preserve_world":
-            raise ValueError(
-                "Non-default Xsens root-motion modes require xsens_morphology.mode='g1_proportioned'"
-            )
+            raise ValueError("Non-default Xsens root-motion modes require xsens_morphology.mode='g1_proportioned'")
         return
     if task_type != "robot_only" or robot != "g1":
         raise ValueError(
@@ -269,8 +269,7 @@ def prepare_xsens_motion_for_retargeting(
         preserve_joint_offsets=morphology_config.preserve_joint_offsets,
     )
     logger.info(
-        "Adapted Xsens motion to G1 proportions "
-        "(root_motion=%s, grounding=%s, preserve_joint_offsets=%s)",
+        "Adapted Xsens motion to G1 proportions (root_motion=%s, grounding=%s, preserve_joint_offsets=%s)",
         morphology_config.root_motion.mode,
         morphology_config.grounding,
         morphology_config.preserve_joint_offsets,
@@ -612,7 +611,8 @@ def build_retargeter_kwargs_from_config(
         "foot_sticking_tolerance": retargeter_config.foot_sticking_tolerance,
         "self_collision": retargeter_config.self_collision,
         "orientation": retargeter_config.orientation,
-        "staged_optimization": retargeter_config.staged_optimization,
+        "optimization_schedule": retargeter_config.optimization_schedule,
+        "orientation_first_iterations": retargeter_config.orientation_first_iterations,
         "step_size": retargeter_config.step_size,
         "initial_iterations": retargeter_config.initial_iterations,
         "iterations_per_frame": retargeter_config.iterations_per_frame,
@@ -637,7 +637,7 @@ def load_orientation_targets_for_retargeting(
     morphology_config: XsensMorphologyConfig,
 ) -> XsensOrientationTargets | None:
     """Load optional Xsens orientation/axis targets for retargeting."""
-    if not orientation_config.enable:
+    if not orientation_config.is_enabled:
         return None
     if data_format != "xsens" or task_type != "robot_only":
         raise ValueError("Orientation-aware retargeting currently supports only robot_only Xsens data")
@@ -648,14 +648,19 @@ def load_orientation_targets_for_retargeting(
             calibration_path=orientation_config.calibration_path,
             motion_quaternions_wijk=xsens_motion.quaternions_wijk,
             segment_names=xsens_motion.segment_names,
+            arm_orientation_mode=orientation_config.arm_mode,
         )
     if hdf5_path is None:
         raise ValueError("The source Xsens HDF5 path is required for automatic orientation calibration")
 
+    candidate_orientation_mapping = dict(CANDIDATE_ORIENTATION_MAPPING)
+    if orientation_config.arm_mode == "frame-and-bend":
+        candidate_orientation_mapping.update(FRAME_AND_BEND_ARM_ORIENTATION_MAPPING)
     calibration_config = XsensTposeCalibrationConfig(
         robot_type=robot,
         robot_urdf_file=robot_config.ROBOT_URDF_FILE,
         verbose=0,
+        candidate_orientation_mapping=candidate_orientation_mapping,
     )
     if morphology_config.mode == "g1_proportioned":
         g1_model_path = resolve_xsens_g1_model_path(robot_config, morphology_config)
@@ -688,10 +693,11 @@ def load_orientation_targets_for_retargeting(
         calibration,
         motion_quaternions_wijk=xsens_motion.quaternions_wijk,
         segment_names=xsens_motion.segment_names,
+        arm_orientation_mode=orientation_config.arm_mode,
     )
 
 
-def resolve_orientation_tracking_config(
+def resolve_arm_orientation_mode(
     *,
     retargeter_config: RetargeterConfig,
     morphology_config: XsensMorphologyConfig,
@@ -699,19 +705,22 @@ def resolve_orientation_tracking_config(
     task_type: str,
     robot: str,
 ) -> RetargeterConfig:
-    """Enable calibrated orientations for the default G1-proportioned Xsens path."""
-    auto_enable = (
-        task_type == "robot_only"
-        and data_format == "xsens"
-        and robot == "g1"
-        and morphology_config.mode == "g1_proportioned"
-        and morphology_config.track_orientations
-    )
-    if not auto_enable or retargeter_config.orientation.enable:
+    """Resolve the context-dependent ``auto`` arm-orientation mode."""
+    if retargeter_config.orientation.arm_mode != "auto":
         return retargeter_config
+    resolved_mode = (
+        "longitudinal-axes"
+        if (
+            task_type == "robot_only"
+            and data_format == "xsens"
+            and robot == "g1"
+            and morphology_config.mode == "g1_proportioned"
+        )
+        else "off"
+    )
     return replace(
         retargeter_config,
-        orientation=replace(retargeter_config.orientation, enable=True),
+        orientation=replace(retargeter_config.orientation, arm_mode=resolved_mode),
     )
 
 
@@ -754,9 +763,9 @@ def describe_retargeting_setup(
             f"(weight={retargeter.w_nominal_tracking_init}, nominal trajectory={nominal_status})"
         ),
         (
-            f"    [{'active' if retargeter.staged_optimization.enable else 'inactive'}] "
-            "orientation-first stage "
-            f"(iterations={retargeter.staged_optimization.iterations})"
+            f"    [{'active' if retargeter.optimization_schedule == 'orientation-first' else 'inactive'}] "
+            "orientation-first optimization stage "
+            f"(iterations={retargeter.orientation_first_iterations})"
         ),
     ]
 
@@ -782,6 +791,18 @@ def describe_retargeting_setup(
                 ),
             ]
         )
+        if orientation_targets.elbow_bend_names:
+            lines.append(
+                "    [active] scalar elbow-bend tracking "
+                f"(weight={retargeter.orientation_config.axis_weight}, "
+                f"targets={len(orientation_targets.elbow_bend_names)}): "
+                + ", ".join(orientation_targets.elbow_bend_names)
+            )
+        if retargeter.orientation_config.arm_mode == "frame-and-bend":
+            lines.append(
+                "    [active, experimental] frame-and-bend arm orientation mode "
+                "(upper-arm orientation + elbow bend + hand orientation; arm directions replaced)"
+            )
 
     lines.extend(
         [
@@ -975,7 +996,7 @@ def main(cfg: RetargetingConfig) -> None:
         robot=robot,
         config=cfg.xsens_morphology,
     )
-    retargeter_config = resolve_orientation_tracking_config(
+    retargeter_config = resolve_arm_orientation_mode(
         retargeter_config=cfg.retargeter,
         morphology_config=cfg.xsens_morphology,
         data_format=data_format,

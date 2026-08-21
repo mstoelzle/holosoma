@@ -55,6 +55,12 @@ CANDIDATE_ORIENTATION_MAPPING = {
     "Right Hand": "right_rubber_hand_link",
 }
 
+FRAME_AND_BEND_ARM_ORIENTATION_MAPPING = {
+    "Left Upper Arm": "left_shoulder_yaw_link",
+    "Right Upper Arm": "right_shoulder_yaw_link",
+}
+
+
 @dataclass(frozen=True)
 class CalibrationAxisTarget:
     """One T-pose direction target represented by two frames or a body-fixed axis."""
@@ -81,25 +87,17 @@ LIMB_AXIS_TARGETS = (
         "Right Upper Arm", "Right Forearm", "right_shoulder_yaw_link", "right_elbow_link", "right_upper_arm"
     ),
     CalibrationAxisTarget("Left Forearm", "Left Hand", "left_elbow_link", "left_wrist_yaw_link", "left_forearm"),
-    CalibrationAxisTarget(
-        "Right Forearm", "Right Hand", "right_elbow_link", "right_wrist_yaw_link", "right_forearm"
-    ),
+    CalibrationAxisTarget("Right Forearm", "Right Hand", "right_elbow_link", "right_wrist_yaw_link", "right_forearm"),
     # Match the runtime whole-hip direction; the Upper Leg point itself is
     # calibrated against the distal hip-yaw origin above.
-    CalibrationAxisTarget(
-        "Left Upper Leg", "Left Lower Leg", "left_hip_pitch_link", "left_knee_link", "left_thigh"
-    ),
+    CalibrationAxisTarget("Left Upper Leg", "Left Lower Leg", "left_hip_pitch_link", "left_knee_link", "left_thigh"),
     CalibrationAxisTarget(
         "Right Upper Leg", "Right Lower Leg", "right_hip_pitch_link", "right_knee_link", "right_thigh"
     ),
     CalibrationAxisTarget("Left Lower Leg", "Left Foot", "left_knee_link", "left_ankle_pitch_link", "left_shank"),
-    CalibrationAxisTarget(
-        "Right Lower Leg", "Right Foot", "right_knee_link", "right_ankle_pitch_link", "right_shank"
-    ),
+    CalibrationAxisTarget("Right Lower Leg", "Right Foot", "right_knee_link", "right_ankle_pitch_link", "right_shank"),
     CalibrationAxisTarget("Left Foot", "Left Toe", "left_ankle_roll_link", None, "left_foot", (1.0, 0.0, 0.0)),
-    CalibrationAxisTarget(
-        "Right Foot", "Right Toe", "right_ankle_roll_link", None, "right_foot", (1.0, 0.0, 0.0)
-    ),
+    CalibrationAxisTarget("Right Foot", "Right Toe", "right_ankle_roll_link", None, "right_foot", (1.0, 0.0, 0.0)),
     CalibrationAxisTarget("Pelvis", "L5", "pelvis_contour_link", "torso_link", "torso"),
 )
 

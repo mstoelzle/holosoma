@@ -19,9 +19,9 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
 from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
+    OptimizationSchedule,
     OrientationTrackingConfig,
     SelfCollisionConfig,
-    StagedOptimizationConfig,
 )
 from holosoma_retargeting.xsens.orientation_tracking import XsensOrientationTargets
 
@@ -72,7 +72,8 @@ class InteractionMeshRetargeter:
         foot_lock: FootLockConfig | None = None,
         self_collision: SelfCollisionConfig | None = None,
         orientation: OrientationTrackingConfig | None = None,
-        staged_optimization: StagedOptimizationConfig | None = None,
+        optimization_schedule: OptimizationSchedule = "single-stage",
+        orientation_first_iterations: int = 20,
         visualize: bool = False,
         debug: bool = False,
         w_nominal_tracking_init: float = 5.0,
@@ -130,9 +131,14 @@ class InteractionMeshRetargeter:
         self._init_foot_lock(foot_lock)
         self._self_collision_config = self_collision
         self.orientation_config = orientation or OrientationTrackingConfig()
-        self.staged_optimization = staged_optimization or StagedOptimizationConfig()
-        if self.staged_optimization.enable and not self.orientation_config.enable:
-            raise ValueError("staged_optimization.enable requires orientation.enable")
+        if optimization_schedule not in {"single-stage", "orientation-first"}:
+            raise ValueError(f"Unsupported optimization schedule: {optimization_schedule}")
+        self.optimization_schedule = optimization_schedule
+        if orientation_first_iterations <= 0:
+            raise ValueError("orientation_first_iterations must be positive")
+        self.orientation_first_iterations = orientation_first_iterations
+        if self.optimization_schedule == "orientation-first" and not self.orientation_config.is_enabled:
+            raise ValueError("The orientation-first schedule requires orientation tracking")
 
         # Setup visualization if requested
         if self.visualize:
@@ -433,10 +439,10 @@ class InteractionMeshRetargeter:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
         num_frames = human_joint_motions.shape[0]
-        if orientation_targets is not None and not self.orientation_config.enable:
-            raise ValueError("orientation_targets were provided but retargeter.orientation.enable is False")
-        if self.orientation_config.enable and orientation_targets is None:
-            raise ValueError("retargeter.orientation.enable requires orientation_targets")
+        if orientation_targets is not None and not self.orientation_config.is_enabled:
+            raise ValueError("orientation_targets were provided while orientation tracking is off")
+        if self.orientation_config.is_enabled and orientation_targets is None:
+            raise ValueError("The selected arm-orientation mode requires orientation_targets")
         if orientation_targets is not None:
             if orientation_targets.orientation_target_rotations.shape[0] != num_frames:
                 raise ValueError(
@@ -448,11 +454,42 @@ class InteractionMeshRetargeter:
                     "Axis target frame count does not match motion frame count: "
                     f"{orientation_targets.axis_target_vectors.shape[0]} vs {num_frames}"
                 )
-            if self.staged_optimization.enable:
+            if orientation_targets.elbow_bend_target_cosines.shape[0] not in (0, num_frames):
+                raise ValueError(
+                    "Elbow-bend target frame count does not match motion frame count: "
+                    f"{orientation_targets.elbow_bend_target_cosines.shape[0]} vs {num_frames}"
+                )
+            elbow_target_count = len(orientation_targets.elbow_bend_names)
+            elbow_metadata_counts = {
+                elbow_target_count,
+                len(orientation_targets.elbow_bend_robot_shoulder_link_names),
+                len(orientation_targets.elbow_bend_robot_elbow_link_names),
+                len(orientation_targets.elbow_bend_robot_wrist_link_names),
+                orientation_targets.elbow_bend_target_cosines.shape[1],
+                len(orientation_targets.elbow_bend_weights),
+            }
+            if len(elbow_metadata_counts) != 1:
+                raise ValueError("Elbow-bend target metadata must have matching lengths")
+            if self.orientation_config.arm_mode == "frame-and-bend":
+                required_upper_arms = {"Left Upper Arm", "Right Upper Arm"}
+                required_elbow_bends = {"left_elbow_bend", "right_elbow_bend"}
+                removed_arm_axes = {
+                    "left_upper_arm",
+                    "right_upper_arm",
+                    "left_forearm",
+                    "right_forearm",
+                }
+                if not required_upper_arms.issubset(orientation_targets.orientation_names):
+                    raise ValueError("frame-and-bend requires full-orientation targets for both upper arms")
+                if not required_elbow_bends.issubset(orientation_targets.elbow_bend_names):
+                    raise ValueError("frame-and-bend requires elbow-bend targets for both arms")
+                if removed_arm_axes.intersection(orientation_targets.axis_names):
+                    raise ValueError("frame-and-bend must replace, rather than supplement, the arm direction targets")
+            if self.optimization_schedule == "orientation-first":
                 if not orientation_targets.orientation_names:
-                    raise ValueError("staged_optimization.enable requires at least one full-orientation target")
+                    raise ValueError("The orientation-first schedule requires at least one full-orientation target")
                 if not orientation_targets.axis_names:
-                    raise ValueError("staged_optimization.enable requires at least one segment-axis target")
+                    raise ValueError("The orientation-first schedule requires at least one segment-axis target")
         if isinstance(object_points_local_demo, list):
             assert len(object_points_local_demo) == num_frames, (
                 f"object_points_local_demo length {len(object_points_local_demo)} != num_frames {num_frames}"
@@ -536,7 +573,7 @@ class InteractionMeshRetargeter:
                     w_nominal_tracking = self.w_nominal_tracking_init * np.exp(-i / self.nominal_tracking_tau)
 
                 full_iterations = self.initial_iterations if i == 0 else self.iterations_per_frame
-                if self.staged_optimization.enable:
+                if self.optimization_schedule == "orientation-first":
                     assert orientation_targets is not None
                     q, _ = self.iterate(
                         q_locked=q_locked_list[i],
@@ -548,11 +585,11 @@ class InteractionMeshRetargeter:
                         foot_sticking=foot_sticking_sequences[i],
                         orientation_targets=orientation_targets,
                         init_t=i == 0,
-                        n_iter=self.staged_optimization.iterations,
+                        n_iter=self.orientation_first_iterations,
                         frame_idx=i,
                         include_position_tracking=False,
                     )
-                    full_iterations = max(full_iterations, self.staged_optimization.iterations)
+                    full_iterations = max(full_iterations, self.orientation_first_iterations)
                 q, cost = self.iterate(
                     q_locked=q_locked_list[i],
                     q_n=q,
@@ -616,7 +653,9 @@ class InteractionMeshRetargeter:
             ),
             orientation_errors_rad=np.asarray(orientation_error_history, dtype=float),
             axis_error_names=np.asarray(
-                [] if orientation_targets is None else orientation_targets.axis_names,
+                []
+                if orientation_targets is None
+                else orientation_targets.axis_names + orientation_targets.elbow_bend_names,
                 dtype=str,
             ),
             axis_errors_deg=np.asarray(axis_error_history, dtype=float),
@@ -1000,6 +1039,19 @@ class InteractionMeshRetargeter:
             orientation_targets.axis_robot_local_vectors[axis_idx],
         )
 
+    def _elbow_bend_cosine_jacobian(
+        self,
+        shoulder_frame: str,
+        elbow_frame: str,
+        wrist_frame: str,
+    ) -> tuple[float, np.ndarray]:
+        """Return upper/forearm cosine and its configuration Jacobian."""
+        upper_axis, J_upper = self._axis_jacobian(shoulder_frame, elbow_frame)
+        forearm_axis, J_forearm = self._axis_jacobian(elbow_frame, wrist_frame)
+        cosine = float(np.clip(np.dot(upper_axis, forearm_axis), -1.0, 1.0))
+        jacobian = forearm_axis @ J_upper + upper_axis @ J_forearm
+        return cosine, np.asarray(jacobian, dtype=float)
+
     def _orientation_tracking_objective_terms(
         self,
         q: np.ndarray,
@@ -1030,6 +1082,17 @@ class InteractionMeshRetargeter:
             weight = self.orientation_config.axis_weight * float(orientation_targets.axis_weights[axis_idx])
             terms.append(weight * cp.sum_squares(cp.Constant(J_active) @ dqa + cp.Constant(current_axis - target_axis)))
 
+        for elbow_idx in range(len(orientation_targets.elbow_bend_names)):
+            current_cosine, J_cosine = self._elbow_bend_cosine_jacobian(
+                orientation_targets.elbow_bend_robot_shoulder_link_names[elbow_idx],
+                orientation_targets.elbow_bend_robot_elbow_link_names[elbow_idx],
+                orientation_targets.elbow_bend_robot_wrist_link_names[elbow_idx],
+            )
+            target_cosine = orientation_targets.elbow_bend_target_cosines[frame_idx, elbow_idx]
+            J_active = J_cosine[self.q_a_indices]
+            weight = self.orientation_config.axis_weight * float(orientation_targets.elbow_bend_weights[elbow_idx])
+            terms.append(weight * cp.square(cp.Constant(J_active) @ dqa + cp.Constant(current_cosine - target_cosine)))
+
         return terms
 
     def _orientation_tracking_errors(
@@ -1054,6 +1117,23 @@ class InteractionMeshRetargeter:
             target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
             dot = float(np.clip(np.dot(current_axis, target_axis), -1.0, 1.0))
             axis_errors.append(float(np.degrees(np.arccos(dot))))
+
+        for elbow_idx in range(len(orientation_targets.elbow_bend_names)):
+            current_cosine, _ = self._elbow_bend_cosine_jacobian(
+                orientation_targets.elbow_bend_robot_shoulder_link_names[elbow_idx],
+                orientation_targets.elbow_bend_robot_elbow_link_names[elbow_idx],
+                orientation_targets.elbow_bend_robot_wrist_link_names[elbow_idx],
+            )
+            target_cosine = float(
+                np.clip(
+                    orientation_targets.elbow_bend_target_cosines[frame_idx, elbow_idx],
+                    -1.0,
+                    1.0,
+                )
+            )
+            current_angle = float(np.arccos(np.clip(current_cosine, -1.0, 1.0)))
+            target_angle = float(np.arccos(target_cosine))
+            axis_errors.append(float(np.degrees(abs(current_angle - target_angle))))
 
         return np.asarray(orientation_errors, dtype=float), np.asarray(axis_errors, dtype=float)
 

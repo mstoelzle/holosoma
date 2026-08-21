@@ -27,9 +27,6 @@ if str(src_root) not in sys.path:
 
 from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
-from holosoma_retargeting.src.paths import DEMO_RESULTS_PARALLEL_DIR  # noqa: E402
-
-# Import reusable functions from robot_retarget.py
 from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
     build_retargeter_kwargs_from_config,
@@ -40,15 +37,14 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
     load_orientation_targets_for_retargeting,
     log_retargeting_setup,
     prepare_xsens_motion_for_retargeting,
-    resolve_orientation_tracking_config,
+    resolve_arm_orientation_mode,
     setup_object_data,
     validate_xsens_morphology_selection,
 )
-
-# Import after path modification
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
     InteractionMeshRetargeter,  # type: ignore[import-not-found]
 )
+from holosoma_retargeting.src.paths import DEMO_RESULTS_PARALLEL_DIR  # noqa: E402
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
     extract_foot_sticking_sequence_velocity,
     preprocess_motion_data,
@@ -193,7 +189,7 @@ def process_single_task(args):
             robot_config=robot_config,
             morphology_config=xsens_morphology,
         )
-    retargeter = resolve_orientation_tracking_config(
+    retargeter = resolve_arm_orientation_mode(
         retargeter_config=retargeter,
         morphology_config=xsens_morphology,
         data_format=data_format,
