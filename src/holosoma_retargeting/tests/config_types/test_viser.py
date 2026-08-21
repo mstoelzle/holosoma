@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 from holosoma_retargeting.config_types.viser import ViserConfig, XsensViserConfig
 from holosoma_retargeting.config_values.viser import get_default_xsens_viser_config
-from holosoma_retargeting.kinematics.model import quaternion_multiply, rotate_vector
 from holosoma_retargeting.src.viser_utils import CameraFollowController, resolve_frame_times
+from holosoma_retargeting.transformation_utils import quaternion_multiply
 from holosoma_retargeting.viser_player import (
     G1_HAND_TO_XSENS_FRAME_WXYZ,
     G1_RACKET_FRAME_WXYZ,
@@ -28,7 +28,10 @@ from holosoma_retargeting.viser_player import (
     resolve_actor_modes,
     resolve_actor_offsets,
     resolve_record_output_path,
+    sample_tennis_racket_pose_at_time,
     update_g1_tennis_racket_pose,
+    update_saved_tennis_racket_pose,
+    validate_combined_recording_paths,
 )
 
 
@@ -142,6 +145,7 @@ def test_xsens_options_are_not_part_of_global_viser_config() -> None:
     assert xsens.actor_spacing_m == 2.0
     assert xsens.show_tennis_racket is True
     assert xsens.g1_xsens_root_motion.mode == "scale_by_leg_length"
+    assert xsens.allow_mismatched_sources is False
     assert isinstance(get_default_xsens_viser_config(), XsensViserConfig)
 
 
@@ -230,7 +234,10 @@ def test_g1_tennis_racket_pose_uses_robot_local_palm_transform() -> None:
 
     update_g1_tennis_racket_pose(racket, FakeUrdf())
 
-    np.testing.assert_allclose(racket.position, np.array([1.0, 0.0, 0.0]) + G1_RACKET_GRIP_OFFSET_M)
+    np.testing.assert_allclose(
+        racket.position,
+        np.array([-G1_RACKET_GRIP_OFFSET_M[1], G1_RACKET_GRIP_OFFSET_M[0], G1_RACKET_GRIP_OFFSET_M[2]]),
+    )
     np.testing.assert_allclose(
         racket.wxyz,
         quaternion_multiply(
@@ -268,10 +275,53 @@ def test_g1_tennis_racket_palm_offset_rotates_with_wrist() -> None:
     )
 
 
+def test_saved_world_racket_pose_is_converted_to_robot_local_frame() -> None:
+    quarter_turn_about_z_wxyz = np.array([np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)])
+    motion = SimpleNamespace(
+        position_m=np.array([[2.0, 4.0, 3.0]]),
+        quaternion_wxyz=np.array([[1.0, 0.0, 0.0, 0.0]]),
+    )
+    racket = SimpleNamespace(position=np.zeros(3), wxyz=np.array([1.0, 0.0, 0.0, 0.0]))
+
+    update_saved_tennis_racket_pose(
+        racket,
+        motion,
+        0.0,
+        motion_fps=30.0,
+        robot_world_position_m=np.array([1.0, 4.0, 1.0]),
+        robot_world_quaternion_wxyz=quarter_turn_about_z_wxyz,
+        display_position_offset_m=np.array([0.0, 2.0, 0.0]),
+    )
+
+    np.testing.assert_allclose(racket.position, [2.0, -1.0, 2.0], atol=1e-12)
+    np.testing.assert_allclose(racket.wxyz, [np.sqrt(0.5), 0.0, 0.0, -np.sqrt(0.5)], atol=1e-12)
+
+
+def test_saved_racket_pose_interpolates_from_30_to_60_hz() -> None:
+    motion = SimpleNamespace(
+        position_m=np.array([[0.0, 0.0, 0.0], [2.0, 4.0, 6.0]]),
+        quaternion_wxyz=np.array(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        ),
+    )
+
+    position, quaternion = sample_tennis_racket_pose_at_time(
+        motion,
+        1.0 / 60.0,
+        fps=30.0,
+    )
+
+    np.testing.assert_allclose(position, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(quaternion, [np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)], atol=1e-12)
+
+
 def test_g1_racket_frame_maps_xsens_roll_through_g1_hand_axes() -> None:
     np.testing.assert_allclose(
-        G1_RACKET_GRIP_OFFSET_M,
-        rotate_vector(G1_HAND_TO_XSENS_FRAME_WXYZ, G1_XSENS_RACKET_GRIP_OFFSET_M),
+        G1_XSENS_RACKET_GRIP_OFFSET_M,
+        [0.02995738, -0.09651599, 0.01196775],
     )
     np.testing.assert_allclose(
         G1_RACKET_FRAME_WXYZ,
@@ -359,6 +409,28 @@ def test_explicit_record_path_overrides_derived_path() -> None:
     )
 
     assert resolve_record_output_path(config) == "videos/custom.gif"
+
+
+def test_combined_recordings_must_have_matching_source_names() -> None:
+    validate_combined_recording_paths(
+        Path("recording_S00_original.npz"),
+        Path("recording_S00.hdf5"),
+        allow_mismatch=False,
+    )
+    with pytest.raises(ValueError, match="same recording"):
+        validate_combined_recording_paths(
+            Path("2026-07-17_tennis_S00.npz"),
+            Path("2026-07-24_tennis_S16.hdf5"),
+            allow_mismatch=False,
+        )
+
+
+def test_combined_recording_mismatch_can_be_explicitly_allowed() -> None:
+    validate_combined_recording_paths(
+        Path("retargeted_result.npz"),
+        Path("different_source.hdf5"),
+        allow_mismatch=True,
+    )
 
 
 def test_actor_modes_are_composable_unique_and_canonically_ordered() -> None:

@@ -6,7 +6,7 @@ from collections import OrderedDict
 from dataclasses import replace
 
 import numpy as np
-from holosoma_retargeting.kinematics.model import rotate_vector
+from holosoma_retargeting.transformation_utils import rotate_vector
 from holosoma_retargeting.xsens.avatar_mesh import (
     build_tennis_racket_meshes,
     build_xsens_avatar_meshes,

@@ -15,7 +15,7 @@ import numpy as np
 import trimesh  # type: ignore[import-untyped]
 
 from holosoma_retargeting.data_utils.xsens_hdf5 import XsensHdf5Calibration, load_xsens_hdf5_calibration
-from holosoma_retargeting.kinematics.model import quaternion_multiply, rotate_vector
+from holosoma_retargeting.transformation_utils import quaternion_multiply, rotate_vector
 from holosoma_retargeting.xsens.kinematic_model import XSENS_RACKET_SOURCE_SEGMENT
 
 LIGHT_GRAY = (190, 196, 197)

@@ -8,9 +8,12 @@ from pathlib import Path
 from typing import Protocol
 
 import numpy as np
-from scipy.spatial.transform import Rotation  # type: ignore[import-untyped]
 
 from holosoma_retargeting.config_types.data_type import XSENS_DEMO_JOINTS
+from holosoma_retargeting.transformation_utils import (
+    normalize_vector,
+    rotation_matrices_from_wxyz,
+)
 
 
 @dataclass(frozen=True)
@@ -202,31 +205,6 @@ XSENS_AXIS_SPECS = (
 )
 
 
-def normalize_vector(vector: np.ndarray, fallback: np.ndarray | None = None) -> np.ndarray:
-    """Normalize a vector with a deterministic fallback for degenerate inputs."""
-    vector = np.asarray(vector, dtype=float)
-    norm = float(np.linalg.norm(vector))
-    if norm > 1e-9:
-        return vector / norm
-    if fallback is None:
-        fallback = np.zeros_like(vector)
-    return np.asarray(fallback, dtype=float)
-
-
-def quat_wijk_to_matrix(quaternions_wijk: np.ndarray) -> np.ndarray:
-    """Convert Xsens `w, i, j, k` quaternions to rotation matrices."""
-    q = np.asarray(quaternions_wijk, dtype=float)
-    xyzw = np.stack([q[..., 1], q[..., 2], q[..., 3], q[..., 0]], axis=-1)
-    return Rotation.from_quat(xyzw.reshape(-1, 4)).as_matrix().reshape(q.shape[:-1] + (3, 3))
-
-
-def matrix_to_quat_wijk(matrix: np.ndarray) -> np.ndarray:
-    """Convert rotation matrices to `w, i, j, k` quaternions."""
-    matrix = np.asarray(matrix, dtype=float)
-    xyzw = Rotation.from_matrix(matrix.reshape(-1, 3, 3)).as_quat().reshape(matrix.shape[:-2] + (4,))
-    return np.stack([xyzw[..., 3], xyzw[..., 0], xyzw[..., 1], xyzw[..., 2]], axis=-1)
-
-
 def segment_index(name: str) -> int:
     """Return the standard Xsens body segment index."""
     return XSENS_DEMO_JOINTS.index(name)
@@ -239,7 +217,7 @@ def build_xsens_axis_calibration_metadata(
 ) -> dict[str, np.ndarray]:
     """Build serializable axis metadata from an Xsens T-pose."""
     positions = np.asarray(tpose_positions_m, dtype=float)
-    rotations = quat_wijk_to_matrix(tpose_quaternions_wijk)
+    rotations = rotation_matrices_from_wxyz(tpose_quaternions_wijk)
     axis_names = []
     axis_segments = []
     axis_start_links = []
@@ -298,7 +276,7 @@ def build_xsens_orientation_targets(
             f"{motion_quaternions.shape[1]} vs {len(segment_names)}"
         )
 
-    rotations = quat_wijk_to_matrix(motion_quaternions)
+    rotations = rotation_matrices_from_wxyz(motion_quaternions)
     segment_to_index = {name: idx for idx, name in enumerate(segment_names)}
 
     orientation_offsets = np.asarray(orientation_offsets_wijk, dtype=float)
@@ -306,7 +284,7 @@ def build_xsens_orientation_targets(
         orientation_offsets
     ):
         raise ValueError("Calibration orientation mapping names, robot links, and offsets must have the same length")
-    offset_rotations = quat_wijk_to_matrix(orientation_offsets)
+    offset_rotations = rotation_matrices_from_wxyz(orientation_offsets)
     orientation_targets = np.zeros((motion_quaternions.shape[0], len(orientation_names), 3, 3), dtype=float)
     for mapping_idx, xsens_name in enumerate(orientation_names):
         if xsens_name not in segment_to_index:

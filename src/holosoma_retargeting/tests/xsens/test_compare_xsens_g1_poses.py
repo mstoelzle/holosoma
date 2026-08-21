@@ -15,7 +15,7 @@ from holosoma_retargeting.examples.xsens_tennis.compare_xsens_g1_poses import (
     tree_vertical_bounds,
 )
 from holosoma_retargeting.kinematics import KinematicPose
-from holosoma_retargeting.kinematics.model import rotate_vector
+from holosoma_retargeting.transformation_utils import rotate_vector
 from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     build_g1_proportioned_xsens_tree,
     extract_g1_anthropometry,

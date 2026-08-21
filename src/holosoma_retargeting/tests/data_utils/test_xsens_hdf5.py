@@ -17,7 +17,7 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import (
     load_xsens_hdf5_tpose,
     resolve_xsens_hdf5_path,
 )
-from holosoma_retargeting.xsens.orientation_tracking import quat_wijk_to_matrix
+from holosoma_retargeting.transformation_utils import rotation_matrices_from_wxyz
 from scipy.spatial.transform import Rotation
 
 
@@ -270,7 +270,7 @@ def test_motion_loader_converts_position_cm_flat_orientations_to_retargeting_fra
 
     np.testing.assert_allclose(motion.positions_m[0, 0], [1.0, 3.0, 2.0])
     expected_rotation = XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX @ rot_xsens @ XSENS_Y_UP_TO_RETARGETING_Z_UP_MATRIX.T
-    actual_rotation = quat_wijk_to_matrix(motion.quaternions_wijk[0, 0])
+    actual_rotation = rotation_matrices_from_wxyz(motion.quaternions_wijk[0, 0])
     np.testing.assert_allclose(actual_rotation, expected_rotation, atol=1e-12)
 
 

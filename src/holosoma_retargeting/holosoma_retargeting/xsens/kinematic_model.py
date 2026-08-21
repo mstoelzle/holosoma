@@ -14,7 +14,7 @@ from holosoma_retargeting.kinematics import (
     SphericalJointDefinition,
     Transform,
 )
-from holosoma_retargeting.kinematics.model import quaternion_conjugate, quaternion_multiply, rotate_vector
+from holosoma_retargeting.transformation_utils import quaternion_conjugate, quaternion_multiply, rotate_vector
 
 XSENS_RACKET_SOURCE_SEGMENT = "RightHandSword"
 XSENS_RACKET_SOURCE_JOINT = "RightHandSwordOrigin"
