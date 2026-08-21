@@ -27,6 +27,21 @@ RACKET_GRIP = (118, 78, 48)
 RACKET_STRINGS = (218, 220, 211)
 NAIL_LIGHT = (238, 229, 211)
 
+# Xsens places the tracked prop origin at the selected RightHand attachment
+# point; it is not the center of the physical racket grip.  In the recorded
+# S16 T-pose, moving the nominal racket 20 mm toward its head aligns the grip
+# butt with the ulnar edge of the hand, while 27 mm along the palmar normal
+# places the 18 mm-radius handle against the palm surface.
+XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.020, 0.027, 0.0)
+# The G1-proportioned hand uses a separate T-pose-derived correction because
+# its generated palm dimensions and preserved recorded orientations differ
+# from the measured subject mesh. A triangle-mesh contact scan refines the
+# palm-normal component to leave approximately 0.05 mm surface clearance.
+G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.0256, 0.02775, 0.0)
+TENNIS_RACKET_GRIP_RADIUS_M = 0.018
+TENNIS_RACKET_GRIP_HALF_LENGTH_M = 0.09
+TENNIS_RACKET_GRIP_SECTIONS = 10
+
 
 @dataclass(frozen=True)
 class XsensAvatarProportions:
@@ -808,17 +823,33 @@ def _ellipse_tube(
     return trimesh.util.concatenate(cylinders)
 
 
-def build_tennis_racket_meshes() -> tuple[AvatarMeshPart, ...]:
+def build_tennis_racket_meshes(
+    *,
+    visual_offset_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> tuple[AvatarMeshPart, ...]:
     """Build a regulation-sized racket aligned to the tracked sword frame.
 
     Xsens rolls the recorded ``RightHandSword`` frame -90 degrees around its
     longitudinal +X axis in the T-pose. The inverse local mesh rotation keeps
     that calibrated frame intact while making the racket's string plane
-    horizontal in the resulting world-space T-pose.
+    horizontal in the resulting world-space T-pose. Callers rendering an Xsens
+    avatar may supply a visual-only translation that maps the tracked prop
+    origin to the physical grip. Physical-robot callers leave it at zero and
+    rely on their calibrated hand-to-racket attachment instead.
     """
 
-    handle = cylinder_between(np.array([-0.09, 0.0, 0.0]), np.array([0.09, 0.0, 0.0]), 0.018, sections=10)
-    shaft = cylinder_between(np.array([0.09, 0.0, 0.0]), np.array([0.25, 0.0, 0.0]), 0.009, sections=10)
+    handle = cylinder_between(
+        np.array([-TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
+        np.array([TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
+        TENNIS_RACKET_GRIP_RADIUS_M,
+        sections=TENNIS_RACKET_GRIP_SECTIONS,
+    )
+    shaft = cylinder_between(
+        np.array([TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
+        np.array([0.25, 0.0, 0.0]),
+        0.009,
+        sections=10,
+    )
     throat_left = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, 0.075, 0.0]), 0.008, sections=8)
     throat_right = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, -0.075, 0.0]), 0.008, sections=8)
     hoop_center = np.array([0.415, 0.0, 0.0])
@@ -849,8 +880,10 @@ def build_tennis_racket_meshes() -> tuple[AvatarMeshPart, ...]:
         )
     strings_mesh = trimesh.util.concatenate(strings)
     sword_frame_alignment = trimesh.transformations.rotation_matrix(np.pi / 2.0, [1.0, 0.0, 0.0])
+    visual_offset = np.asarray(visual_offset_m, dtype=float)
     for mesh in (handle, frame, strings_mesh):
         mesh.apply_transform(sword_frame_alignment)
+        mesh.apply_translation(visual_offset)
 
     return (
         AvatarMeshPart("racket_grip", handle, RACKET_GRIP, "racket"),

@@ -119,7 +119,8 @@ Pass an override with `--retargeter.orientation.tennis-racket.attachment-path`. 
 applies the recording's embedded hand-to-sword T-pose correction to the global, palm-centered G1 grasp. Use
 `attachment-source global` to disable the sequence-specific correction, or `attachment-source observed_window
 --observed-window-s START END` to apply a mean correction over an explicit good-pose time window. The calibration
-viewer reports whether the handle center lies inside the palm interior.
+viewer reports whether the finite grip contacts the calibrated central palm patch; thumb and distal-finger
+protrusions are excluded from this validation.
 
 Raw results now store achieved racket position/orientation, per-frame tracking state, selected symmetry branch,
 symmetry-aware residual, source-origin deviation, wrist-limit margin, and the effective versioned attachment.

@@ -23,6 +23,7 @@ from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     G1Anthropometry,
     G1XsensReductionConfig,
     _fit_collapsed_shoulder_morphology,
+    _hand_transverse_radii,
     build_g1_proportioned_xsens_tree,
     export_g1_proportioned_xsens_usd,
     extract_g1_anthropometry,
@@ -70,6 +71,31 @@ def test_anthropometry_extraction_has_no_pose_input_or_state_evaluation(monkeypa
     assert result.lengths_m["upper_arm"] > 0.0
     assert result.lengths_m["forearm"] > 0.0
     assert not np.isclose(result.lengths_m["upper_arm"], result.lengths_m["forearm"])
+
+
+def test_hand_thickness_uses_proximal_palm_instead_of_distal_finger_envelope() -> None:
+    proximal = np.array(
+        [
+            [0.0, -0.015, -0.045],
+            [0.0, 0.015, 0.045],
+            [0.04, -0.015, -0.045],
+            [0.04, 0.015, 0.045],
+        ]
+    )
+    distal = np.array(
+        [
+            [0.10, -0.010, -0.040],
+            [0.10, 0.045, 0.040],
+        ]
+    )
+
+    radii = _hand_transverse_radii(
+        np.vstack([proximal, distal]),
+        np.zeros(3),
+        np.array([0.12, 0.0, 0.0]),
+    )
+
+    np.testing.assert_allclose(radii, [0.015, 0.045])
 
 
 def test_body_only_tree_matches_optimizer_xsens_contract(anthropometry: G1Anthropometry) -> None:
@@ -148,6 +174,7 @@ def test_default_collapses_axes_into_adapters_and_preserves_rigid_lengths(
     proportions = g1_anthropometry_to_xsens_avatar_proportions(anthropometry)
     expected_palm_offset = proportions.landmarks_m["RightHand"]["pRightHandPalm"]
     np.testing.assert_allclose(expected_palm_offset, G1_XSENS_RACKET_GRIP_OFFSET_M, atol=1e-8)
+    assert expected_palm_offset[2] < 0.0
     np.testing.assert_allclose(
         bodies["TennisRacket"].reference_pose.translation_m,
         bodies["RightHand"].reference_pose.translation_m + expected_palm_offset,
@@ -452,6 +479,7 @@ def test_hands_reuse_calibrated_avatar_parts_and_match_g1_envelope(
             2.0 * anthropometry.segment_radii_m["hand"][0],
         ]
     )
+    assert target_extent[2] < 0.04
 
     for title, sign in (("Left", 1.0), ("Right", -1.0)):
         meshes = model.body_map()[f"{title}Hand"].meshes

@@ -23,19 +23,27 @@ from holosoma_retargeting.transformation_utils import (
     rotations_from_wxyz,
     transform_from_position_quaternion,
 )
+from holosoma_retargeting.xsens.avatar_mesh import (
+    TENNIS_RACKET_GRIP_HALF_LENGTH_M,
+    TENNIS_RACKET_GRIP_RADIUS_M,
+)
 from holosoma_retargeting.xsens.kinematic_model import XSENS_RACKET_SOURCE_SEGMENT
 
 if TYPE_CHECKING:
     import mujoco  # type: ignore[import-not-found]
 
 
-TENNIS_RACKET_RESULT_SCHEMA_VERSION = 1
+TENNIS_RACKET_RESULT_SCHEMA_VERSION = 2
 TENNIS_RACKET_HAND_SEGMENT = "Right Hand"
 TENNIS_RACKET_HAND_LINK = "right_rubber_hand_link"
 TENNIS_RACKET_LONGITUDINAL_AXIS_LOCAL = np.array([1.0, 0.0, 0.0], dtype=float)
 DEFAULT_TENNIS_RACKET_ATTACHMENT_PATH = (
     Path(__file__).resolve().parents[1] / "models" / "g1" / "tennis_racket_attachment.json"
 )
+# Central rubber-palm patch extracted from the G1 hand mesh. These model-local
+# bounds exclude the thumb root (near X=80 mm, Z=50 mm) and distal fingers.
+G1_PALM_CONTACT_BOUNDS_MIN_M = np.array([0.0500153, -0.01669491, -0.02496773])
+G1_PALM_CONTACT_BOUNDS_MAX_M = np.array([0.07499168, 0.01299217, 0.02489448])
 
 TennisRacketAttachmentSource = Literal["global", "embedded_tpose", "observed_window"]
 
@@ -74,6 +82,8 @@ class TennisRacketAttachment:
     longitudinal_axis_local: np.ndarray
     palm_bounds_min_m: np.ndarray
     palm_bounds_max_m: np.ndarray
+    palm_contact_bounds_min_m: np.ndarray
+    palm_contact_bounds_max_m: np.ndarray
     source_reference_position_m: np.ndarray
     source_reference_quaternion_wxyz: np.ndarray
     calibration_source: TennisRacketAttachmentSource = "global"
@@ -88,10 +98,14 @@ class TennisRacketAttachment:
         source_position = np.asarray(self.source_reference_position_m, dtype=float).reshape(3)
         palm_minimum = np.asarray(self.palm_bounds_min_m, dtype=float).reshape(3)
         palm_maximum = np.asarray(self.palm_bounds_max_m, dtype=float).reshape(3)
+        contact_minimum = np.asarray(self.palm_contact_bounds_min_m, dtype=float).reshape(3)
+        contact_maximum = np.asarray(self.palm_contact_bounds_max_m, dtype=float).reshape(3)
         if not np.isfinite(position).all() or not np.isfinite(source_position).all():
             raise ValueError("Tennis-racket attachment positions must be finite")
         if not np.isfinite(palm_minimum).all() or not np.all(palm_maximum > palm_minimum):
             raise ValueError("Tennis-racket palm bounds must be finite and nonempty")
+        if not np.isfinite(contact_minimum).all() or not np.all(contact_maximum > contact_minimum):
+            raise ValueError("Tennis-racket palm contact bounds must be finite and nonempty")
         axis_norm = float(np.linalg.norm(axis))
         if not np.isfinite(axis).all() or axis_norm <= 1e-12:
             raise ValueError("The tennis-racket longitudinal axis must be finite and nonzero")
@@ -100,6 +114,8 @@ class TennisRacketAttachment:
         object.__setattr__(self, "longitudinal_axis_local", axis / axis_norm)
         object.__setattr__(self, "palm_bounds_min_m", palm_minimum)
         object.__setattr__(self, "palm_bounds_max_m", palm_maximum)
+        object.__setattr__(self, "palm_contact_bounds_min_m", contact_minimum)
+        object.__setattr__(self, "palm_contact_bounds_max_m", contact_maximum)
         object.__setattr__(self, "source_reference_position_m", source_position)
         object.__setattr__(
             self,
@@ -178,6 +194,12 @@ class TennisRacketMotion:
             "tennis_racket_longitudinal_axis_local": np.asarray(self.attachment.longitudinal_axis_local, dtype=float),
             "tennis_racket_palm_bounds_min_m": np.asarray(self.attachment.palm_bounds_min_m, dtype=float),
             "tennis_racket_palm_bounds_max_m": np.asarray(self.attachment.palm_bounds_max_m, dtype=float),
+            "tennis_racket_palm_contact_bounds_min_m": np.asarray(
+                self.attachment.palm_contact_bounds_min_m, dtype=float
+            ),
+            "tennis_racket_palm_contact_bounds_max_m": np.asarray(
+                self.attachment.palm_contact_bounds_max_m, dtype=float
+            ),
         }
 
 
@@ -252,6 +274,20 @@ def tennis_racket_motion_from_npz(data: Mapping[str, np.ndarray]) -> TennisRacke
         palm_bounds_max_m=np.asarray(
             data.get("tennis_racket_palm_bounds_max_m", base_attachment.palm_bounds_max_m), dtype=float
         ),
+        palm_contact_bounds_min_m=np.asarray(
+            data.get(
+                "tennis_racket_palm_contact_bounds_min_m",
+                base_attachment.palm_contact_bounds_min_m,
+            ),
+            dtype=float,
+        ),
+        palm_contact_bounds_max_m=np.asarray(
+            data.get(
+                "tennis_racket_palm_contact_bounds_max_m",
+                base_attachment.palm_contact_bounds_max_m,
+            ),
+            dtype=float,
+        ),
         calibration_source=_scalar_text(data["tennis_racket_attachment_source"]),
         schema_version=int(np.asarray(data["tennis_racket_schema_version"]).reshape(())),
         artifact_path=None,
@@ -288,19 +324,29 @@ def load_tennis_racket_attachment(path: str | Path | None = None) -> TennisRacke
     if not artifact_path.is_file():
         raise FileNotFoundError(f"Tennis-racket attachment artifact not found: {artifact_path}")
     payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-    if int(payload.get("schema_version", -1)) != TENNIS_RACKET_RESULT_SCHEMA_VERSION:
+    schema_version = int(payload.get("schema_version", -1))
+    if schema_version not in (1, TENNIS_RACKET_RESULT_SCHEMA_VERSION):
         raise ValueError(
             f"Unsupported tennis-racket attachment schema in {artifact_path}: {payload.get('schema_version')}"
         )
+    palm_minimum = np.asarray(payload["palm_bounds_min_m"], dtype=float)
+    palm_maximum = np.asarray(payload["palm_bounds_max_m"], dtype=float)
     return TennisRacketAttachment(
         hand_link=str(payload["hand_link"]),
         position_m=np.asarray(payload["position_m"], dtype=float),
         quaternion_wxyz=np.asarray(payload["quaternion_wxyz"], dtype=float),
         longitudinal_axis_local=np.asarray(payload["longitudinal_axis_local"], dtype=float),
-        palm_bounds_min_m=np.asarray(payload["palm_bounds_min_m"], dtype=float),
-        palm_bounds_max_m=np.asarray(payload["palm_bounds_max_m"], dtype=float),
+        palm_bounds_min_m=palm_minimum,
+        palm_bounds_max_m=palm_maximum,
+        palm_contact_bounds_min_m=np.asarray(
+            payload.get("palm_contact_bounds_min_m", G1_PALM_CONTACT_BOUNDS_MIN_M), dtype=float
+        ),
+        palm_contact_bounds_max_m=np.asarray(
+            payload.get("palm_contact_bounds_max_m", G1_PALM_CONTACT_BOUNDS_MAX_M), dtype=float
+        ),
         source_reference_position_m=np.asarray(payload["source_reference_position_m"], dtype=float),
         source_reference_quaternion_wxyz=np.asarray(payload["source_reference_quaternion_wxyz"], dtype=float),
+        schema_version=schema_version,
         artifact_path=artifact_path.resolve(),
     )
 
@@ -318,6 +364,8 @@ def save_tennis_racket_attachment(attachment: TennisRacketAttachment, path: str 
         "longitudinal_axis_local": attachment.longitudinal_axis_local.tolist(),
         "palm_bounds_min_m": attachment.palm_bounds_min_m.tolist(),
         "palm_bounds_max_m": attachment.palm_bounds_max_m.tolist(),
+        "palm_contact_bounds_min_m": attachment.palm_contact_bounds_min_m.tolist(),
+        "palm_contact_bounds_max_m": attachment.palm_contact_bounds_max_m.tolist(),
         "source_reference_position_m": attachment.source_reference_position_m.tolist(),
         "source_reference_quaternion_wxyz": attachment.source_reference_quaternion_wxyz.tolist(),
     }
@@ -498,20 +546,30 @@ def tennis_racket_target_error_rad(
 def attachment_handle_intersects_palm(
     attachment: TennisRacketAttachment,
     *,
-    inset_fraction: float = 0.15,
+    inset_fraction: float = 0.0,
 ) -> bool:
-    """Check that the grasp origin lies inside an inset palm volume.
+    """Check the finite racket grip against the calibrated central palm patch.
 
-    The racket frame origin is the handle centerline at the grasp. Requiring it
-    inside the inset rubber-hand bounds prevents surface-resting calibrations.
+    ``palm_contact_bounds`` deliberately excludes the G1 thumb and distal
+    fingers. Sampling the finite handle centerline and testing its radius
+    against that box prevents those protrusions from defining palm contact.
     """
 
     if not 0.0 <= inset_fraction < 0.5:
         raise ValueError("inset_fraction must be in [0, 0.5)")
-    span = attachment.palm_bounds_max_m - attachment.palm_bounds_min_m
-    minimum = attachment.palm_bounds_min_m + inset_fraction * span
-    maximum = attachment.palm_bounds_max_m - inset_fraction * span
-    return bool(np.all(attachment.position_m >= minimum) and np.all(attachment.position_m <= maximum))
+    span = attachment.palm_contact_bounds_max_m - attachment.palm_contact_bounds_min_m
+    minimum = attachment.palm_contact_bounds_min_m + inset_fraction * span
+    maximum = attachment.palm_contact_bounds_max_m - inset_fraction * span
+    rotation = rotations_from_wxyz(attachment.quaternion_wxyz)
+    axis_hand = rotation.apply(attachment.longitudinal_axis_local)
+    centerline = attachment.position_m + np.linspace(
+        -TENNIS_RACKET_GRIP_HALF_LENGTH_M,
+        TENNIS_RACKET_GRIP_HALF_LENGTH_M,
+        65,
+    )[:, None] * axis_hand
+    closest_in_box = np.clip(centerline, minimum, maximum)
+    distance = np.linalg.norm(centerline - closest_in_box, axis=1)
+    return bool(float(distance.min()) <= TENNIS_RACKET_GRIP_RADIUS_M)
 
 
 def achieved_tennis_racket_pose(
