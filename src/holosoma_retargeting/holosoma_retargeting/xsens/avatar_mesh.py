@@ -39,6 +39,7 @@ XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.020, 0.027, 0.0)
 # palm-normal component to leave approximately 0.05 mm surface clearance.
 G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M = (0.0256, 0.02775, 0.0)
 TENNIS_RACKET_GRIP_RADIUS_M = 0.018
+TENNIS_RACKET_GRIP_HALF_LENGTH_M = 0.09
 TENNIS_RACKET_GRIP_SECTIONS = 10
 
 
@@ -838,12 +839,17 @@ def build_tennis_racket_meshes(
     """
 
     handle = cylinder_between(
-        np.array([-0.09, 0.0, 0.0]),
-        np.array([0.09, 0.0, 0.0]),
+        np.array([-TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
+        np.array([TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
         TENNIS_RACKET_GRIP_RADIUS_M,
         sections=TENNIS_RACKET_GRIP_SECTIONS,
     )
-    shaft = cylinder_between(np.array([0.09, 0.0, 0.0]), np.array([0.25, 0.0, 0.0]), 0.009, sections=10)
+    shaft = cylinder_between(
+        np.array([TENNIS_RACKET_GRIP_HALF_LENGTH_M, 0.0, 0.0]),
+        np.array([0.25, 0.0, 0.0]),
+        0.009,
+        sections=10,
+    )
     throat_left = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, 0.075, 0.0]), 0.008, sections=8)
     throat_right = cylinder_between(np.array([0.16, 0.0, 0.0]), np.array([0.27, -0.075, 0.0]), 0.008, sections=8)
     hoop_center = np.array([0.415, 0.0, 0.0])

@@ -96,9 +96,9 @@ def main(config: Config) -> None:
         current["value"] = _attachment_from_controls(attachment, xyz, rpy)
         update_g1_tennis_racket_pose(racket_frame, robot, current["value"])
         status.value = (
-            "PASS: handle center is inside the palm interior"
+            "PASS: grip contacts the central palm patch"
             if attachment_handle_intersects_palm(current["value"])
-            else "FAIL: move the handle center off the hand surface and into the palm interior"
+            else "FAIL: grip does not contact the central palm patch"
         )
 
     for control in (*xyz, *rpy):

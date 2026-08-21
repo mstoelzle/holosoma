@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -72,11 +73,16 @@ def test_global_attachment_places_grip_at_palm_surface_and_aligns_butt_to_hand_e
         palm_center[0],
         atol=5e-6,
     )
-    assert attachment.position_m[1] == pytest.approx(0.040005, abs=1e-9)
+    assert attachment.position_m[1] == pytest.approx(0.03075, abs=1e-9)
+    assert attachment.palm_contact_bounds_max_m[0] < 0.08
+    assert attachment.palm_contact_bounds_max_m[2] < 0.025
     butt_position = attachment.position_m - 0.09 * axis_hand
     palm_edge = np.where(axis_hand >= 0.0, attachment.palm_bounds_min_m, attachment.palm_bounds_max_m)
     assert np.dot(butt_position, axis_hand) == pytest.approx(np.dot(palm_edge, axis_hand), abs=1e-8)
     assert attachment_handle_intersects_palm(attachment)
+    assert not attachment_handle_intersects_palm(
+        replace(attachment, position_m=attachment.position_m + np.array([0.0, 0.001, 0.0]))
+    )
 
 
 def test_branch_selection_tracks_nearest_realized_hand_and_prior_tie_break() -> None:
@@ -236,6 +242,17 @@ def test_embedded_tpose_calibration_and_attachment_override(monkeypatch, tmp_pat
     loaded = load_tennis_racket_attachment(override_path)
     np.testing.assert_allclose(loaded.position_m, embedded.position_m)
     np.testing.assert_allclose(loaded.quaternion_wxyz, embedded.quaternion_wxyz)
+    np.testing.assert_allclose(loaded.palm_contact_bounds_min_m, embedded.palm_contact_bounds_min_m)
+    np.testing.assert_allclose(loaded.palm_contact_bounds_max_m, embedded.palm_contact_bounds_max_m)
+
+    legacy_payload = json.loads(override_path.read_text(encoding="utf-8"))
+    legacy_payload["schema_version"] = 1
+    legacy_payload.pop("palm_contact_bounds_min_m")
+    legacy_payload.pop("palm_contact_bounds_max_m")
+    override_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    legacy_loaded = load_tennis_racket_attachment(override_path)
+    np.testing.assert_allclose(legacy_loaded.palm_contact_bounds_min_m, embedded.palm_contact_bounds_min_m)
+    np.testing.assert_allclose(legacy_loaded.palm_contact_bounds_max_m, embedded.palm_contact_bounds_max_m)
 
 
 def test_retargeting_result_round_trip_and_legacy_compatibility(tmp_path) -> None:
