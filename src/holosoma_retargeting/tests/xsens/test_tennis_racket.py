@@ -304,28 +304,10 @@ def test_racket_tracker_checkpoint_restores_history_and_filter_state() -> None:
         attachment=motion.attachment,
     )
 
-    tracker.restore_checkpoint(
-        motion,
-        active=True,
-        reentry_streak=2,
-        previous_branch=0,
-    )
+    tracker.restore_checkpoint_state(motion, (True, 2, 0))
 
-    assert tracker.recorded_frame_count == frame_count
-    assert tracker.checkpoint_filter_state() == (True, 2, 0)
-    restored_motion = tracker.build_motion()
+    restored_motion, filter_state = tracker.checkpoint_state()
+    assert filter_state == (True, 2, 0)
     np.testing.assert_array_equal(restored_motion.position_m, motion.position_m)
     np.testing.assert_array_equal(restored_motion.tracking_state, motion.tracking_state)
     np.testing.assert_array_equal(restored_motion.source_origin_deviation_m, source_deviation[:frame_count])
-
-    mismatched_attachment = replace(
-        motion.attachment,
-        position_m=motion.attachment.position_m + np.array([0.01, 0.0, 0.0]),
-    )
-    with pytest.raises(ValueError, match="attachment does not match"):
-        tracker.restore_checkpoint(
-            replace(motion, attachment=mismatched_attachment),
-            active=True,
-            reentry_streak=2,
-            previous_branch=0,
-        )

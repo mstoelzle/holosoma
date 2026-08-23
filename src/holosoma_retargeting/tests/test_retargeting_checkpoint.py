@@ -75,9 +75,7 @@ def test_checkpoint_round_trip_without_optional_diagnostics(tmp_path: Path) -> N
         path,
         total_frames=5,
         nq=4,
-        has_orientation_targets=False,
-        orientation_error_count=0,
-        axis_error_count=0,
+        orientation_shape=None,
         racket_tracking_mode=None,
     )
 
@@ -98,9 +96,7 @@ def test_checkpoint_preserves_zero_width_orientation_histories(tmp_path: Path) -
         path,
         total_frames=5,
         nq=4,
-        has_orientation_targets=True,
-        orientation_error_count=0,
-        axis_error_count=0,
+        orientation_shape=(0, 0),
         racket_tracking_mode=None,
     )
 
@@ -128,9 +124,7 @@ def test_checkpoint_round_trip_with_diagnostics_and_racket(tmp_path: Path) -> No
         orientation_errors_rad=np.zeros((frame_count, 3)),
         axis_errors_deg=np.zeros((frame_count, 2)),
         racket_motion=racket_motion,
-        racket_active=True,
-        racket_reentry_streak=2,
-        racket_previous_branch=0,
+        racket_filter_state=(True, 2, 0),
     )
     path = tmp_path / "racket.checkpoint.npz"
     atomic_savez(path, payload)
@@ -139,16 +133,12 @@ def test_checkpoint_round_trip_with_diagnostics_and_racket(tmp_path: Path) -> No
         path,
         total_frames=4,
         nq=6,
-        has_orientation_targets=True,
-        orientation_error_count=3,
-        axis_error_count=2,
+        orientation_shape=(3, 2),
         racket_tracking_mode="filtered",
     )
 
     assert checkpoint.racket_motion is not None
-    assert checkpoint.racket_active
-    assert checkpoint.racket_reentry_streak == 2
-    assert checkpoint.racket_previous_branch == 0
+    assert checkpoint.racket_filter_state == (True, 2, 0)
     np.testing.assert_array_equal(checkpoint.racket_motion.symmetry_branch, [0, -1])
 
 
@@ -168,7 +158,7 @@ def test_checkpoint_round_trip_with_diagnostics_and_racket(tmp_path: Path) -> No
         ),
         (
             lambda payload: payload.__setitem__("qpos", np.zeros((2, 3))),
-            "Checkpoint qpos must have shape",
+            "Checkpoint qpos has incompatible shape",
         ),
         (
             lambda payload: payload.__setitem__("qpos", np.full((2, 4), np.nan)),
@@ -191,9 +181,7 @@ def test_checkpoint_rejects_incompatible_state(
             path,
             total_frames=5,
             nq=4,
-            has_orientation_targets=False,
-            orientation_error_count=0,
-            axis_error_count=0,
+            orientation_shape=None,
             racket_tracking_mode=None,
         )
 
@@ -207,8 +195,6 @@ def test_checkpoint_rejects_corrupt_archive(tmp_path: Path) -> None:
             path,
             total_frames=5,
             nq=4,
-            has_orientation_targets=False,
-            orientation_error_count=0,
-            axis_error_count=0,
+            orientation_shape=None,
             racket_tracking_mode=None,
         )

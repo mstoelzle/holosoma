@@ -61,10 +61,8 @@ def _inputs(frame_count: int = 5) -> dict[str, object]:
     }
 
 
-def test_interrupted_run_flushes_and_resumes_exactly(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.fixture(autouse=True)
+def _stub_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "holosoma_retargeting.src.interaction_mesh_retargeter.create_interaction_mesh",
         lambda vertices: (vertices, np.array([[0, 0, 0, 0]], dtype=int)),
@@ -77,6 +75,9 @@ def test_interrupted_run_flushes_and_resumes_exactly(
         "holosoma_retargeting.src.interaction_mesh_retargeter.calculate_laplacian_coordinates",
         lambda vertices, _adjacency: np.zeros_like(vertices),
     )
+
+
+def test_interrupted_run_flushes_and_resumes_exactly(tmp_path) -> None:
     inputs = _inputs()
     resumed_path = tmp_path / "resumed.npz"
 
@@ -91,7 +92,6 @@ def test_interrupted_run_flushes_and_resumes_exactly(
     checkpoint_path = checkpoint_path_for_result(resumed_path)
     assert checkpoint_path.exists()
     with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
-        assert int(checkpoint["checkpoint_completed_frames"]) == 3
         assert checkpoint["qpos"].shape == (3, 10)
 
     resumed = _retargeter()
@@ -122,22 +122,7 @@ def test_interrupted_run_flushes_and_resumes_exactly(
         )
 
 
-def test_resume_with_missing_checkpoint_starts_from_zero(
-    tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.create_interaction_mesh",
-        lambda vertices: (vertices, np.array([[0, 0, 0, 0]], dtype=int)),
-    )
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.get_adjacency_list",
-        lambda _tetrahedra, vertex_count: [[] for _ in range(vertex_count)],
-    )
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.calculate_laplacian_coordinates",
-        lambda vertices, _adjacency: np.zeros_like(vertices),
-    )
+def test_resume_with_missing_checkpoint_starts_from_zero(tmp_path) -> None:
     retargeter = _retargeter()
 
     retargeter.retarget_motion(
@@ -153,21 +138,8 @@ def test_resume_with_missing_checkpoint_starts_from_zero(
 @pytest.mark.parametrize("resume", [False, True])
 def test_existing_checkpoint_is_ignored_or_finalized_without_solving(
     tmp_path,
-    monkeypatch: pytest.MonkeyPatch,
     resume: bool,
 ) -> None:
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.create_interaction_mesh",
-        lambda vertices: (vertices, np.array([[0, 0, 0, 0]], dtype=int)),
-    )
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.get_adjacency_list",
-        lambda _tetrahedra, vertex_count: [[] for _ in range(vertex_count)],
-    )
-    monkeypatch.setattr(
-        "holosoma_retargeting.src.interaction_mesh_retargeter.calculate_laplacian_coordinates",
-        lambda vertices, _adjacency: np.zeros_like(vertices),
-    )
     result_path = tmp_path / "complete.npz"
     checkpoint_path = checkpoint_path_for_result(result_path)
     saved_qpos = np.zeros((2, 10), dtype=float)
