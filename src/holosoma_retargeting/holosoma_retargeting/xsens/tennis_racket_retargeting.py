@@ -272,16 +272,75 @@ class TennisRacketFrameTracker:
         )
         self._wrist_margins.append(self._wrist_limit_margin(solution.q))
 
+    @property
+    def recorded_frame_count(self) -> int:
+        """Number of accepted frames currently held by this tracker."""
+
+        return len(self._positions)
+
+    def checkpoint_filter_state(self) -> tuple[bool, int, int | None]:
+        """Return the temporal filter state required for an exact continuation."""
+
+        return self._active, self._reentry_streak, self._previous_branch
+
+    def restore_checkpoint(
+        self,
+        motion: TennisRacketMotion,
+        *,
+        active: bool,
+        reentry_streak: int,
+        previous_branch: int | None,
+    ) -> None:
+        """Restore accepted motion diagnostics and temporal filter state."""
+
+        if motion.tracking_mode != self.config.mode:
+            raise ValueError("Checkpoint tennis-racket tracking mode does not match the current retargeting run")
+        current_attachment = self.targets.attachment
+        saved_attachment = motion.attachment
+        attachment_arrays = (
+            "position_m",
+            "quaternion_wxyz",
+            "longitudinal_axis_local",
+            "palm_bounds_min_m",
+            "palm_bounds_max_m",
+            "palm_contact_bounds_min_m",
+            "palm_contact_bounds_max_m",
+        )
+        if saved_attachment.hand_link != current_attachment.hand_link or any(
+            not np.array_equal(getattr(saved_attachment, name), getattr(current_attachment, name))
+            for name in attachment_arrays
+        ):
+            raise ValueError("Checkpoint tennis-racket attachment does not match the current retargeting run")
+        frame_count = motion.position_m.shape[0]
+        expected_source_deviation = np.asarray(self.targets.source_origin_deviation_m[:frame_count], dtype=float)
+        if not np.array_equal(motion.source_origin_deviation_m, expected_source_deviation):
+            raise ValueError("Checkpoint tennis-racket targets do not match the current retargeting run")
+        if reentry_streak < 0:
+            raise ValueError("Checkpoint racket reentry streak must be nonnegative")
+        if previous_branch not in (None, 0, 1):
+            raise ValueError("Checkpoint previous racket branch must be None, 0, or 1")
+
+        self._positions = [row.copy() for row in motion.position_m]
+        self._quaternions = [row.copy() for row in motion.quaternion_wxyz]
+        self._states = [str(value) for value in motion.tracking_state]
+        self._branches = [int(value) for value in motion.symmetry_branch]
+        self._target_errors = [float(value) for value in motion.target_error_rad]
+        self._wrist_margins = [float(value) for value in motion.min_wrist_limit_margin_rad]
+        self._active = active
+        self._reentry_streak = reentry_streak
+        self._previous_branch = previous_branch
+
     def build_motion(self) -> TennisRacketMotion:
         """Build the first-class saved racket result after all frames are recorded."""
 
+        frame_count = self.recorded_frame_count
         return TennisRacketMotion(
             position_m=np.asarray(self._positions, dtype=float),
             quaternion_wxyz=np.asarray(self._quaternions, dtype=float),
             tracking_state=np.asarray(self._states, dtype=str),
             symmetry_branch=np.asarray(self._branches, dtype=np.int8),
             target_error_rad=np.asarray(self._target_errors, dtype=float),
-            source_origin_deviation_m=np.asarray(self.targets.source_origin_deviation_m, dtype=float),
+            source_origin_deviation_m=np.asarray(self.targets.source_origin_deviation_m[:frame_count], dtype=float),
             min_wrist_limit_margin_rad=np.asarray(self._wrist_margins, dtype=float),
             attachment=self.targets.attachment,
             tracking_mode=self.config.mode,

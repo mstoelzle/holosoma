@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from types import ModuleType
@@ -22,6 +23,12 @@ from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
     OrientationTrackingConfig,
     SelfCollisionConfig,
+)
+from holosoma_retargeting.retargeting_checkpoint import (
+    atomic_savez,
+    checkpoint_path_for_result,
+    checkpoint_payload,
+    load_retargeting_checkpoint,
 )
 from holosoma_retargeting.xsens.orientation_tracking import XsensOrientationTargets
 from holosoma_retargeting.xsens.tennis_racket import TennisRacketTargets
@@ -413,6 +420,8 @@ class InteractionMeshRetargeter:
         tennis_racket_targets: TennisRacketTargets | None = None,
         original=True,
         dest_res_path=None,
+        checkpoint_interval_frames: int = 0,
+        resume: bool = False,
     ):
         """
         The main function to retarget an entire motion sequence frame by frame.
@@ -430,11 +439,24 @@ class InteractionMeshRetargeter:
             q_a_nominal (np.ndarray, optional): Nominal robot configuration.
             orientation_targets: Optional orientation and segment-axis targets for each frame.
             tennis_racket_targets: Optional symmetry-aware racket targets and attachment metadata.
+            checkpoint_interval_frames: Save a recovery sidecar after this many accepted frames.
+                Set to 0 to disable checkpointing.
+            resume: Continue from a compatible sidecar checkpoint when one exists.
 
         Returns:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
         """
         num_frames = human_joint_motions.shape[0]
+        if num_frames == 0:
+            raise ValueError("Retargeting requires at least one motion frame")
+        if checkpoint_interval_frames < 0:
+            raise ValueError("checkpoint_interval_frames must be nonnegative")
+        if resume and checkpoint_interval_frames == 0:
+            raise ValueError("resume requires checkpoint_interval_frames to be positive")
+        checkpoint_enabled = checkpoint_interval_frames > 0
+        if checkpoint_enabled and dest_res_path is None:
+            raise ValueError("Checkpointing requires dest_res_path")
+        checkpoint_path = checkpoint_path_for_result(dest_res_path) if checkpoint_enabled else None
         if orientation_targets is not None and not self.orientation_config.enable:
             raise ValueError("orientation_targets were provided but retargeter.orientation.enable is False")
         if self.orientation_config.enable and orientation_targets is None:
@@ -488,10 +510,126 @@ class InteractionMeshRetargeter:
         obj_pts_list = []  # original size object pts
         orientation_error_history = []
         axis_error_history = []
+        orientation_error_count = 0 if orientation_targets is None else len(orientation_targets.orientation_names)
+        axis_error_count = 0 if orientation_targets is None else len(orientation_targets.axis_names)
+        start_frame = 0
+        cost: float | None = None
+
+        if resume and checkpoint_path is not None and checkpoint_path.exists():
+            checkpoint = load_retargeting_checkpoint(
+                checkpoint_path,
+                total_frames=num_frames,
+                nq=self.nq,
+                has_orientation_targets=orientation_targets is not None,
+                orientation_error_count=orientation_error_count,
+                axis_error_count=axis_error_count,
+                racket_tracking_mode=None if racket_tracker is None else racket_tracker.config.mode,
+            )
+            retargeted_motions.extend(row.copy() for row in checkpoint.qpos)
+            q = checkpoint.qpos[-1].copy()
+            cost = checkpoint.cost
+            if orientation_targets is not None:
+                orientation_error_history.extend(row.copy() for row in checkpoint.orientation_errors_rad)
+                axis_error_history.extend(row.copy() for row in checkpoint.axis_errors_deg)
+            if racket_tracker is not None:
+                assert checkpoint.racket_motion is not None
+                racket_tracker.restore_checkpoint(
+                    checkpoint.racket_motion,
+                    active=checkpoint.racket_active,
+                    reentry_streak=checkpoint.racket_reentry_streak,
+                    previous_branch=checkpoint.racket_previous_branch,
+                )
+            start_frame = checkpoint.completed_frames
+            print(f"Resuming retargeting from frame {start_frame} using {checkpoint_path}")
+        elif resume and checkpoint_path is not None:
+            print(f"No checkpoint found at {checkpoint_path}; starting from frame 0")
+        elif checkpoint_path is not None and checkpoint_path.exists():
+            print(f"Ignoring existing checkpoint because resume is disabled: {checkpoint_path}")
+
+        def _diagnostic_array(history: list[np.ndarray]) -> np.ndarray:
+            return np.asarray(history, dtype=float)
+
+        def _write_checkpoint() -> None:
+            completed_frames = len(retargeted_motions) - 1
+            if checkpoint_path is None or completed_frames == 0 or cost is None:
+                return
+            racket_motion = None
+            racket_active = False
+            racket_reentry_streak = 0
+            racket_previous_branch = None
+            if racket_tracker is not None:
+                racket_motion = racket_tracker.build_motion()
+                racket_active, racket_reentry_streak, racket_previous_branch = racket_tracker.checkpoint_filter_state()
+            payload = checkpoint_payload(
+                total_frames=num_frames,
+                qpos=np.asarray(retargeted_motions[1:], dtype=float),
+                cost=cost,
+                orientation_errors_rad=_diagnostic_array(orientation_error_history),
+                axis_errors_deg=_diagnostic_array(axis_error_history),
+                racket_motion=racket_motion,
+                racket_active=racket_active,
+                racket_reentry_streak=racket_reentry_streak,
+                racket_previous_branch=racket_previous_branch,
+            )
+            atomic_savez(checkpoint_path, payload)
+
+        @contextmanager
+        def _checkpoint_after_error():
+            try:
+                yield
+            except BaseException as error:
+                try:
+                    _write_checkpoint()
+                except Exception as checkpoint_error:
+                    print(f"WARNING: Failed to save retargeting checkpoint: {checkpoint_error}")
+                    if hasattr(error, "add_note"):
+                        error.add_note(f"Additionally failed to save checkpoint: {checkpoint_error}")
+                raise
+
+        # Rebuild inexpensive auxiliary geometry for the accepted prefix so the
+        # method's existing return contract remains unchanged after a resume.
+        for i in range(start_frame):
+            object_quat_demo = object_poses[i, 3:]
+            object_trans_demo = object_poses[i, :3]
+            human_mapped_joints = human_joint_motions[i, self.smplh_mapped_joint_indices]
+            if self.object_name == "ground":
+                human_mapped_joints_in_object = human_mapped_joints
+            else:
+                human_mapped_joints_in_object = transform_points_world_to_local(
+                    object_quat_demo,
+                    object_trans_demo,
+                    human_mapped_joints,
+                )
+            obj_pts_demo_i = (
+                object_points_local_demo[i] if isinstance(object_points_local_demo, list) else object_points_local_demo
+            )
+            _, source_tetrahedra = create_interaction_mesh(np.vstack([human_mapped_joints_in_object, obj_pts_demo_i]))
+            tetrahedra.append(source_tetrahedra)
+            if self.debug:
+                obj_pts_i = object_points_local[i] if isinstance(object_points_local, list) else object_points_local
+                object_quat = object_poses_augmented[i, 3:]
+                object_trans = object_poses_augmented[i, :3]
+                obj_pts_demo_list.append(
+                    transform_points_local_to_world(
+                        object_quat_demo,
+                        object_trans_demo,
+                        obj_pts_demo_i,
+                    )
+                )
+                obj_pts_list.append(transform_points_local_to_world(object_quat, object_trans, obj_pts_i))
+
+        human_kpts_handle_list = []
+        obj_kpts_demo_handle_list = []
+        obj_kpts_handle_list = []
+        robot_kpts_handle_list = []
 
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
-        with tqdm(range(num_frames)) as pbar:
+        with _checkpoint_after_error(), tqdm(
+            range(start_frame, num_frames),
+            initial=start_frame,
+            total=num_frames,
+        ) as pbar:
             for i in pbar:
                 # Get object poses and transform points
                 object_quat_demo = object_poses[i, 3:]
@@ -594,10 +732,15 @@ class InteractionMeshRetargeter:
                     )
 
                 retargeted_motions.append(q)
+                if checkpoint_enabled and (len(retargeted_motions) - 1) % checkpoint_interval_frames == 0:
+                    _write_checkpoint()
                 if self.visualize and self.debug:
                     self.draw_q(q)
 
                 pbar.set_postfix(cost=cost)
+
+        # Preserve a complete recovery point before installing the final result.
+        _write_checkpoint()
 
         # Remove previous debug visualization
         if self.debug:
@@ -654,7 +797,9 @@ class InteractionMeshRetargeter:
         }
         if racket_tracker is not None:
             result_payload.update(racket_tracker.build_motion().as_npz_payload())
-        np.savez(dest_res_path, **result_payload)
+        atomic_savez(dest_res_path, result_payload)
+        if checkpoint_path is not None:
+            checkpoint_path.unlink(missing_ok=True)
         print("Saving results to path:", dest_res_path)
 
         if self.visualize:

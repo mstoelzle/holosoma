@@ -2,7 +2,9 @@
 
 from pathlib import Path
 
-from holosoma_retargeting.examples.robot_retarget import determine_save_dir
+import pytest
+from holosoma_retargeting.config_types.retargeting import RetargetingConfig
+from holosoma_retargeting.examples.robot_retarget import determine_save_dir, validate_config
 
 
 def test_save_dir_is_inferred_from_input_dataset() -> None:
@@ -55,3 +57,15 @@ def test_explicit_save_dir_takes_precedence() -> None:
     )
 
     assert result == Path("custom/results")
+
+
+def test_checkpointing_defaults_to_100_frames_with_explicit_resume() -> None:
+    config = RetargetingConfig()
+
+    assert config.checkpoint_interval_frames == 100
+    assert not config.resume
+
+
+def test_resume_rejects_disabled_checkpointing() -> None:
+    with pytest.raises(ValueError, match="resume requires checkpoint_interval_frames to be positive"):
+        validate_config(RetargetingConfig(checkpoint_interval_frames=0, resume=True))

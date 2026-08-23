@@ -24,6 +24,7 @@ from holosoma_retargeting.xsens.tennis_racket import (
     save_tennis_racket_attachment,
     tennis_racket_target_error_rad,
 )
+from holosoma_retargeting.xsens.tennis_racket_retargeting import TennisRacketFrameTracker
 from scipy.spatial.transform import Rotation
 
 
@@ -280,3 +281,51 @@ def test_retargeting_result_round_trip_and_legacy_compatibility(tmp_path) -> Non
     np.savez(legacy_path, qpos=np.zeros((2, 36)), fps=30)
     legacy = load_retargeting_result(legacy_path)
     assert legacy.tennis_racket is None
+
+
+def test_racket_tracker_checkpoint_restores_history_and_filter_state() -> None:
+    frame_count = 3
+    source_deviation = np.array([0.0, 0.01, 0.02, 0.03])
+    motion = TennisRacketMotion(
+        position_m=np.arange(frame_count * 3, dtype=float).reshape(frame_count, 3),
+        quaternion_wxyz=np.tile([1.0, 0.0, 0.0, 0.0], (frame_count, 1)),
+        tracking_state=np.array(["racket", "racket", "reentry_hysteresis"]),
+        symmetry_branch=np.array([0, 0, -1]),
+        target_error_rad=np.array([0.1, 0.2, 0.3]),
+        source_origin_deviation_m=source_deviation[:frame_count],
+        min_wrist_limit_margin_rad=np.array([0.4, 0.3, 0.2]),
+        attachment=load_tennis_racket_attachment(),
+        tracking_mode="filtered",
+    )
+    tracker = TennisRacketFrameTracker.__new__(TennisRacketFrameTracker)
+    tracker.config = SimpleNamespace(mode="filtered")
+    tracker.targets = SimpleNamespace(
+        source_origin_deviation_m=source_deviation,
+        attachment=motion.attachment,
+    )
+
+    tracker.restore_checkpoint(
+        motion,
+        active=True,
+        reentry_streak=2,
+        previous_branch=0,
+    )
+
+    assert tracker.recorded_frame_count == frame_count
+    assert tracker.checkpoint_filter_state() == (True, 2, 0)
+    restored_motion = tracker.build_motion()
+    np.testing.assert_array_equal(restored_motion.position_m, motion.position_m)
+    np.testing.assert_array_equal(restored_motion.tracking_state, motion.tracking_state)
+    np.testing.assert_array_equal(restored_motion.source_origin_deviation_m, source_deviation[:frame_count])
+
+    mismatched_attachment = replace(
+        motion.attachment,
+        position_m=motion.attachment.position_m + np.array([0.01, 0.0, 0.0]),
+    )
+    with pytest.raises(ValueError, match="attachment does not match"):
+        tracker.restore_checkpoint(
+            replace(motion, attachment=mismatched_attachment),
+            active=True,
+            reentry_streak=2,
+            previous_branch=0,
+        )
