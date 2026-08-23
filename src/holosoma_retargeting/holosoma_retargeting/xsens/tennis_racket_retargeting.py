@@ -272,16 +272,37 @@ class TennisRacketFrameTracker:
         )
         self._wrist_margins.append(self._wrist_limit_margin(solution.q))
 
+    def checkpoint_state(self) -> tuple[TennisRacketMotion, tuple[bool, int, int | None]]:
+        """Return saved outputs plus the minimal temporal filter state."""
+
+        return self.build_motion(), (self._active, self._reentry_streak, self._previous_branch)
+
+    def restore_checkpoint_state(
+        self,
+        motion: TennisRacketMotion,
+        state: tuple[bool, int, int | None],
+    ) -> None:
+        """Restore outputs and temporal state from a validated checkpoint."""
+
+        self._positions = [row.copy() for row in motion.position_m]
+        self._quaternions = [row.copy() for row in motion.quaternion_wxyz]
+        self._states = [str(value) for value in motion.tracking_state]
+        self._branches = [int(value) for value in motion.symmetry_branch]
+        self._target_errors = [float(value) for value in motion.target_error_rad]
+        self._wrist_margins = [float(value) for value in motion.min_wrist_limit_margin_rad]
+        self._active, self._reentry_streak, self._previous_branch = state
+
     def build_motion(self) -> TennisRacketMotion:
         """Build the first-class saved racket result after all frames are recorded."""
 
+        frame_count = len(self._positions)
         return TennisRacketMotion(
             position_m=np.asarray(self._positions, dtype=float),
             quaternion_wxyz=np.asarray(self._quaternions, dtype=float),
             tracking_state=np.asarray(self._states, dtype=str),
             symmetry_branch=np.asarray(self._branches, dtype=np.int8),
             target_error_rad=np.asarray(self._target_errors, dtype=float),
-            source_origin_deviation_m=np.asarray(self.targets.source_origin_deviation_m, dtype=float),
+            source_origin_deviation_m=np.asarray(self.targets.source_origin_deviation_m[:frame_count], dtype=float),
             min_wrist_limit_margin_rad=np.asarray(self._wrist_margins, dtype=float),
             attachment=self.targets.attachment,
             tracking_mode=self.config.mode,

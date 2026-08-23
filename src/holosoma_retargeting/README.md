@@ -57,6 +57,20 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-typ
 
 **Note**: Add `--augmentation` to run original sequences and sequences with augmentation (for object interaction and climbing tasks).
 
+## Checkpointing Long Retargeting Runs
+
+Single-sequence and batch retargeting save an atomic recovery sidecar every 100 accepted frames by default. For a
+result named `sequence.npz`, the sidecar is `sequence.checkpoint.npz`. Resume is explicit:
+
+```bash
+python examples/robot_retarget.py ... --resume
+python examples/parallel_robot_retarget.py ... --resume
+```
+
+Use `--checkpoint-interval-frames N` to change the cadence. Setting it to `0` disables checkpointing and cannot be
+combined with `--resume`. A successful run atomically installs the normal result archive and then deletes its
+checkpoint. Resume assumes the same inputs and optimizer configuration; incompatible or corrupt sidecars are rejected.
+
 ## Xsens Tennis Retargeting
 
 ActionNet-style Xsens HDF5 files can be retargeted as robot-only G1 motions with `--data_format xsens`.

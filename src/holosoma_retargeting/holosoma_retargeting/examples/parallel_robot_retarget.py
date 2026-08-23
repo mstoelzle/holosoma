@@ -41,6 +41,7 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
     prepare_xsens_motion_for_retargeting,
     resolve_orientation_tracking_config,
     setup_object_data,
+    validate_config,
     validate_xsens_morphology_selection,
 )
 
@@ -169,6 +170,8 @@ def process_single_task(args):
         retargeter,
         xsens_morphology,
         augmentation,
+        checkpoint_interval_frames,
+        resume,
     ) = args
 
     os.makedirs(save_dir, exist_ok=True)
@@ -215,11 +218,7 @@ def process_single_task(args):
         morphology_config=xsens_morphology,
     )
     tennis_racket_targets = None
-    if (
-        xsens_motion is not None
-        and orientation_targets is not None
-        and "RightHandSword" in xsens_motion.segment_names
-    ):
+    if xsens_motion is not None and orientation_targets is not None and "RightHandSword" in xsens_motion.segment_names:
         racket_attachment = resolve_tennis_racket_attachment(
             retargeter.orientation.tennis_racket,
             motion=xsens_motion,
@@ -360,6 +359,8 @@ def process_single_task(args):
             tennis_racket_targets=tennis_racket_targets,
             original=(k == 0),
             dest_res_path=file_name,
+            checkpoint_interval_frames=checkpoint_interval_frames,
+            resume=resume,
         )
 
 
@@ -369,6 +370,8 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     Args:
         cfg: Configuration arguments
     """
+    validate_config(cfg)
+
     robot = cfg.robot
     task_type = cfg.task_type
 
@@ -420,6 +423,8 @@ def main(cfg: ParallelRetargetingConfig) -> None:
             cfg.retargeter,
             cfg.xsens_morphology,
             cfg.augmentation,
+            cfg.checkpoint_interval_frames,
+            cfg.resume,
         )
         for file_path in files
     ]

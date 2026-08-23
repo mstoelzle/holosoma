@@ -201,6 +201,11 @@ def validate_config(cfg: RetargetingConfig) -> None:
     Raises:
         ValueError: If configuration is invalid
     """
+    if cfg.checkpoint_interval_frames < 0:
+        raise ValueError("checkpoint_interval_frames must be nonnegative")
+    if cfg.resume and cfg.checkpoint_interval_frames == 0:
+        raise ValueError("resume requires checkpoint_interval_frames to be positive")
+
     # Validate that data_format exists in registry (if provided)
     if cfg.data_format is not None and cfg.data_format not in DEMO_JOINTS_REGISTRY:
         available = ", ".join(sorted(DEMO_JOINTS_REGISTRY.keys()))
@@ -231,9 +236,7 @@ def validate_xsens_morphology_selection(
         return
     if config.mode == "direct":
         if config.root_motion.mode != "preserve_world":
-            raise ValueError(
-                "Non-default Xsens root-motion modes require xsens_morphology.mode='g1_proportioned'"
-            )
+            raise ValueError("Non-default Xsens root-motion modes require xsens_morphology.mode='g1_proportioned'")
         return
     if task_type != "robot_only" or robot != "g1":
         raise ValueError(
@@ -286,8 +289,7 @@ def prepare_xsens_motion_for_retargeting(
         preserve_joint_offsets=morphology_config.preserve_joint_offsets,
     )
     logger.info(
-        "Adapted Xsens motion to G1 proportions "
-        "(root_motion=%s, grounding=%s, preserve_joint_offsets=%s)",
+        "Adapted Xsens motion to G1 proportions (root_motion=%s, grounding=%s, preserve_joint_offsets=%s)",
         morphology_config.root_motion.mode,
         morphology_config.grounding,
         morphology_config.preserve_joint_offsets,
@@ -1045,11 +1047,7 @@ def main(cfg: RetargetingConfig) -> None:
         morphology_config=cfg.xsens_morphology,
     )
     tennis_racket_targets: TennisRacketTargets | None = None
-    if (
-        xsens_motion is not None
-        and orientation_targets is not None
-        and "RightHandSword" in xsens_motion.segment_names
-    ):
+    if xsens_motion is not None and orientation_targets is not None and "RightHandSword" in xsens_motion.segment_names:
         assert hdf5_path is not None
         racket_attachment = resolve_tennis_racket_attachment(
             retargeter_config.orientation.tennis_racket,
@@ -1159,6 +1157,8 @@ def main(cfg: RetargetingConfig) -> None:
         tennis_racket_targets=tennis_racket_targets,
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
+        checkpoint_interval_frames=cfg.checkpoint_interval_frames,
+        resume=cfg.resume,
     )
     logger.info("Retargeting complete. Results saved to: %s", dest_res_path)
 
