@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Literal
@@ -24,6 +24,7 @@ if str(src_root) not in sys.path:
 
 from holosoma_retargeting.config_types.data_type import DEMO_JOINTS_REGISTRY, MotionDataConfig  # noqa: E402
 from holosoma_retargeting.config_types.retargeter import (  # noqa: E402
+    InitializationMode,
     OrientationTrackingConfig,
     RetargeterConfig,
 )
@@ -114,6 +115,14 @@ _AUGMENTATION_TRANSLATION = np.array([0.2, 0.0, 0.0])
 # Type aliases
 TaskType = Literal["robot_only", "object_interaction", "climbing"]
 # DataFormat is imported from config_types.data_type
+
+
+@dataclass(frozen=True)
+class XsensRetargetingReferences:
+    """Calibrated references shared by orientation tracking and multi-start."""
+
+    orientation_targets: XsensOrientationTargets | None
+    calibrated_tpose_qpos: np.ndarray | None
 
 
 # ----------------------------- Helper Functions -----------------------------
@@ -635,6 +644,7 @@ def build_retargeter_kwargs_from_config(
         "self_collision": retargeter_config.self_collision,
         "orientation": retargeter_config.orientation,
         "optimization_schedule": retargeter_config.optimization_schedule,
+        "initialization_mode": retargeter_config.initialization_mode,
         "orientation_first_iterations": retargeter_config.orientation_first_iterations,
         "step_size": retargeter_config.step_size,
         "initial_iterations": retargeter_config.initial_iterations,
@@ -648,9 +658,33 @@ def build_retargeter_kwargs_from_config(
     return kwargs
 
 
-def load_orientation_targets_for_retargeting(
+def _validate_calibrated_tpose_qpos(qpos: np.ndarray) -> np.ndarray:
+    """Return one finite calibrated robot configuration."""
+
+    qpos = np.asarray(qpos, dtype=float)
+    if qpos.ndim == 2 and qpos.shape[0] == 1:
+        qpos = qpos[0]
+    if qpos.ndim != 1 or not np.all(np.isfinite(qpos)):
+        raise ValueError(
+            f"Xsens calibration artifact must contain one finite robot configuration; got shape {qpos.shape}"
+        )
+    return qpos
+
+
+def _load_calibrated_tpose_qpos(calibration_path: Path) -> np.ndarray:
+    """Load the calibrated robot T-pose from an existing calibration artifact."""
+
+    with np.load(calibration_path, allow_pickle=False) as calibration_data:
+        if "qpos" not in calibration_data:
+            raise ValueError(f"Xsens calibration artifact does not contain 'qpos': {calibration_path}")
+        qpos = calibration_data["qpos"]
+    return _validate_calibrated_tpose_qpos(qpos)
+
+
+def load_xsens_retargeting_references(
     *,
     orientation_config: OrientationTrackingConfig,
+    initialization_mode: InitializationMode,
     robot_config: RobotConfig,
     robot: str,
     data_format: str,
@@ -658,23 +692,36 @@ def load_orientation_targets_for_retargeting(
     xsens_motion: XsensHdf5Motion | None,
     hdf5_path: Path | None,
     morphology_config: XsensMorphologyConfig,
-) -> XsensOrientationTargets | None:
-    """Load optional Xsens orientation/axis targets for retargeting."""
-    if not orientation_config.is_enabled:
-        return None
-    if data_format != "xsens" or task_type != "robot_only":
+) -> XsensRetargetingReferences:
+    """Load calibrated Xsens references needed by the selected retargeting modes."""
+
+    needs_orientation = orientation_config.is_enabled
+    needs_tpose = initialization_mode == "multi-start"
+    if not needs_orientation and not needs_tpose:
+        return XsensRetargetingReferences(None, None)
+    if data_format != "xsens" or task_type != "robot_only" or (needs_tpose and robot != "g1"):
+        if needs_tpose:
+            raise ValueError("Multi-start initialization currently supports only robot_only Xsens-to-G1 data")
         raise ValueError("Orientation-aware retargeting currently supports only robot_only Xsens data")
     if xsens_motion is None:
-        raise ValueError("Loaded Xsens motion is required for orientation-aware retargeting")
+        raise ValueError("Loaded Xsens motion is required for calibrated Xsens retargeting")
     if orientation_config.calibration_path is not None:
-        return load_xsens_orientation_targets(
-            calibration_path=orientation_config.calibration_path,
-            motion_quaternions_wijk=xsens_motion.quaternions_wijk,
-            segment_names=xsens_motion.segment_names,
-            arm_orientation_mode=orientation_config.arm_mode,
+        orientation_targets = (
+            load_xsens_orientation_targets(
+                calibration_path=orientation_config.calibration_path,
+                motion_quaternions_wijk=xsens_motion.quaternions_wijk,
+                segment_names=xsens_motion.segment_names,
+                arm_orientation_mode=orientation_config.arm_mode,
+            )
+            if needs_orientation
+            else None
         )
+        calibrated_tpose_qpos = (
+            _load_calibrated_tpose_qpos(orientation_config.calibration_path) if needs_tpose else None
+        )
+        return XsensRetargetingReferences(orientation_targets, calibrated_tpose_qpos)
     if hdf5_path is None:
-        raise ValueError("The source Xsens HDF5 path is required for automatic orientation calibration")
+        raise ValueError("The source Xsens HDF5 path is required for automatic Xsens calibration")
 
     candidate_orientation_mapping = dict(CANDIDATE_ORIENTATION_MAPPING)
     if orientation_config.arm_mode == "frame-and-bend":
@@ -712,12 +759,44 @@ def load_orientation_targets_for_retargeting(
             hdf5_path,
             config=calibration_config,
         )
-    return build_xsens_orientation_targets_from_calibration(
-        calibration,
-        motion_quaternions_wijk=xsens_motion.quaternions_wijk,
-        segment_names=xsens_motion.segment_names,
-        arm_orientation_mode=orientation_config.arm_mode,
+    orientation_targets = (
+        build_xsens_orientation_targets_from_calibration(
+            calibration,
+            motion_quaternions_wijk=xsens_motion.quaternions_wijk,
+            segment_names=xsens_motion.segment_names,
+            arm_orientation_mode=orientation_config.arm_mode,
+        )
+        if needs_orientation
+        else None
     )
+    calibrated_tpose_qpos = _validate_calibrated_tpose_qpos(calibration.qpos) if needs_tpose else None
+    return XsensRetargetingReferences(orientation_targets, calibrated_tpose_qpos)
+
+
+def load_orientation_targets_for_retargeting(
+    *,
+    orientation_config: OrientationTrackingConfig,
+    robot_config: RobotConfig,
+    robot: str,
+    data_format: str,
+    task_type: str,
+    xsens_motion: XsensHdf5Motion | None,
+    hdf5_path: Path | None,
+    morphology_config: XsensMorphologyConfig,
+) -> XsensOrientationTargets | None:
+    """Load optional Xsens orientation targets using the legacy warm-start path."""
+
+    return load_xsens_retargeting_references(
+        orientation_config=orientation_config,
+        initialization_mode="warm-start",
+        robot_config=robot_config,
+        robot=robot,
+        data_format=data_format,
+        task_type=task_type,
+        xsens_motion=xsens_motion,
+        hdf5_path=hdf5_path,
+        morphology_config=morphology_config,
+    ).orientation_targets
 
 
 def resolve_arm_orientation_mode(
@@ -795,6 +874,12 @@ def describe_retargeting_setup(
             f"    [{'active' if retargeter.optimization_schedule == 'orientation-first' else 'inactive'}] "
             "orientation-first optimization stage "
             f"(iterations={retargeter.orientation_first_iterations})"
+        ),
+        (
+            f"    [{'active' if retargeter.initialization_mode == 'multi-start' else 'inactive'}] "
+            "parallel multi-start initialization "
+            "(previous, calibrated T/N, 1.0 s lag, and constant-velocity arm seeds; "
+            "non-temporal exact-objective ranking)"
         ),
     ]
 
@@ -1069,8 +1154,9 @@ def main(cfg: RetargetingConfig) -> None:
             robot_config=cfg.robot_config,
             morphology_config=cfg.xsens_morphology,
         )
-    orientation_targets = load_orientation_targets_for_retargeting(
+    xsens_references = load_xsens_retargeting_references(
         orientation_config=retargeter_config.orientation,
+        initialization_mode=retargeter_config.initialization_mode,
         robot_config=cfg.robot_config,
         robot=robot,
         data_format=data_format,
@@ -1079,6 +1165,7 @@ def main(cfg: RetargetingConfig) -> None:
         hdf5_path=hdf5_path,
         morphology_config=cfg.xsens_morphology,
     )
+    orientation_targets = xsens_references.orientation_targets
     tennis_racket_targets: TennisRacketTargets | None = None
     if xsens_motion is not None and orientation_targets is not None and "RightHandSword" in xsens_motion.segment_names:
         assert hdf5_path is not None
@@ -1188,6 +1275,8 @@ def main(cfg: RetargetingConfig) -> None:
         q_nominal_list=q_nominal,
         orientation_targets=orientation_targets,
         tennis_racket_targets=tennis_racket_targets,
+        frame_times_s=xsens_motion.times_s if xsens_motion is not None else None,
+        calibrated_tpose_qpos=xsens_references.calibrated_tpose_qpos,
         original=not cfg.augmentation,
         dest_res_path=dest_res_path,
         checkpoint_interval_frames=cfg.checkpoint_interval_frames,

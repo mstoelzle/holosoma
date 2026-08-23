@@ -36,7 +36,7 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
     determine_save_dir,
     initialize_robot_pose,
     load_motion_data,
-    load_orientation_targets_for_retargeting,
+    load_xsens_retargeting_references,
     log_retargeting_setup,
     prepare_xsens_motion_for_retargeting,
     resolve_arm_orientation_mode,
@@ -205,8 +205,9 @@ def process_single_task(args):
         task_type=task_type,
         robot=robot_config.robot_type,
     )
-    orientation_targets = load_orientation_targets_for_retargeting(
+    xsens_references = load_xsens_retargeting_references(
         orientation_config=retargeter.orientation,
+        initialization_mode=retargeter.initialization_mode,
         robot_config=robot_config,
         robot=robot_config.robot_type,
         data_format=data_format,
@@ -215,6 +216,7 @@ def process_single_task(args):
         hdf5_path=Path(file_path) if xsens_motion is not None else None,
         morphology_config=xsens_morphology,
     )
+    orientation_targets = xsens_references.orientation_targets
     tennis_racket_targets = None
     if xsens_motion is not None and orientation_targets is not None and "RightHandSword" in xsens_motion.segment_names:
         racket_attachment = resolve_tennis_racket_attachment(
@@ -355,6 +357,8 @@ def process_single_task(args):
             q_nominal_list=q_nominal,
             orientation_targets=orientation_targets,
             tennis_racket_targets=tennis_racket_targets,
+            frame_times_s=xsens_motion.times_s if xsens_motion is not None else None,
+            calibrated_tpose_qpos=xsens_references.calibrated_tpose_qpos,
             original=(k == 0),
             dest_res_path=file_name,
             checkpoint_interval_frames=checkpoint_interval_frames,

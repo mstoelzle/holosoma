@@ -87,6 +87,7 @@ def _retargeter_summary_stub():
         step_size=0.2,
         orientation_config=RetargeterConfig().orientation,
         optimization_schedule=RetargeterConfig().optimization_schedule,
+        initialization_mode=RetargeterConfig().initialization_mode,
         orientation_first_iterations=RetargeterConfig().orientation_first_iterations,
     )
 
@@ -118,6 +119,7 @@ def test_retargeting_summary_lists_active_objectives_and_rotation_offsets() -> N
     assert "[active] full segment-orientation tracking" in summary
     assert "[active] segment-axis direction tracking" in summary
     assert "[inactive] orientation-first optimization stage (iterations=20)" in summary
+    assert "[inactive] parallel multi-start initialization" in summary
     assert "R_G1_target_world(t) = R_Xsens_segment_world(t) @ R_offset" in summary
     assert "Left Hand -> left_rubber_hand_link" in summary
     assert "offset_wxyz=(+0.500000, +0.500000, +0.500000, +0.500000)" in summary
@@ -289,6 +291,119 @@ def test_direct_mode_retains_human_scaled_orientation_calibration(monkeypatch) -
     assert captured["hdf5_path"] == Path("recording.hdf5")
 
 
+def test_multistart_loads_calibrated_tpose_without_orientation_targets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calibration_path = tmp_path / "calibration.npz"
+    expected_qpos = np.arange(12, dtype=float)
+    np.savez(calibration_path, qpos=expected_qpos[None, :])
+
+    def fail_orientation_load(**_kwargs):
+        raise AssertionError("Disabled orientation tracking must not load orientation targets")
+
+    monkeypatch.setattr(robot_retarget, "load_xsens_orientation_targets", fail_orientation_load)
+    references = robot_retarget.load_xsens_retargeting_references(
+        orientation_config=OrientationTrackingConfig(
+            arm_mode="off",
+            calibration_path=calibration_path,
+        ),
+        initialization_mode="multi-start",
+        robot_config=RobotConfig(robot_type="g1"),
+        robot="g1",
+        data_format="xsens",
+        task_type="robot_only",
+        xsens_motion=_motion(),
+        hdf5_path=None,
+        morphology_config=XsensMorphologyConfig(),
+    )
+
+    assert references.orientation_targets is None
+    np.testing.assert_array_equal(references.calibrated_tpose_qpos, expected_qpos)
+
+
+@pytest.mark.parametrize(
+    ("artifact", "error"),
+    [
+        ({"unrelated": np.zeros(1)}, "does not contain 'qpos'"),
+        ({"qpos": np.array([[0.0, np.nan]])}, "finite robot configuration"),
+        ({"qpos": np.zeros((2, 3))}, "finite robot configuration"),
+    ],
+)
+def test_multistart_rejects_malformed_calibrated_tpose(
+    tmp_path: Path,
+    artifact: dict[str, np.ndarray],
+    error: str,
+) -> None:
+    calibration_path = tmp_path / "calibration.npz"
+    np.savez(calibration_path, **artifact)
+
+    with pytest.raises(ValueError, match=error):
+        robot_retarget.load_xsens_retargeting_references(
+            orientation_config=OrientationTrackingConfig(
+                arm_mode="off",
+                calibration_path=calibration_path,
+            ),
+            initialization_mode="multi-start",
+            robot_config=RobotConfig(robot_type="g1"),
+            robot="g1",
+            data_format="xsens",
+            task_type="robot_only",
+            xsens_motion=_motion(),
+            hdf5_path=None,
+            morphology_config=XsensMorphologyConfig(),
+        )
+
+
+def test_multistart_automatic_calibration_reuses_solved_tpose(monkeypatch) -> None:
+    motion = _motion()
+    expected_qpos = np.arange(12, dtype=float)
+    calibration = SimpleNamespace(qpos=expected_qpos)
+    targets = object()
+
+    monkeypatch.setattr(robot_retarget, "adapt_xsens_tpose_to_g1", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        robot_retarget,
+        "solve_xsens_tpose_calibration_from_data",
+        lambda *_args, **_kwargs: calibration,
+    )
+    monkeypatch.setattr(
+        robot_retarget,
+        "build_xsens_orientation_targets_from_calibration",
+        lambda solved_calibration, **_kwargs: targets if solved_calibration is calibration else None,
+    )
+
+    references = robot_retarget.load_xsens_retargeting_references(
+        orientation_config=OrientationTrackingConfig(arm_mode="longitudinal-axes"),
+        initialization_mode="multi-start",
+        robot_config=RobotConfig(robot_type="g1"),
+        robot="g1",
+        data_format="xsens",
+        task_type="robot_only",
+        xsens_motion=motion,
+        hdf5_path=Path("recording.hdf5"),
+        morphology_config=XsensMorphologyConfig(),
+    )
+
+    assert references.orientation_targets is targets
+    np.testing.assert_array_equal(references.calibrated_tpose_qpos, expected_qpos)
+
+
+def test_multistart_references_reject_unsupported_morphology() -> None:
+    with pytest.raises(ValueError, match="robot_only Xsens-to-G1"):
+        robot_retarget.load_xsens_retargeting_references(
+            orientation_config=OrientationTrackingConfig(arm_mode="off"),
+            initialization_mode="multi-start",
+            robot_config=RobotConfig(robot_type="t1"),
+            robot="t1",
+            data_format="xsens",
+            task_type="robot_only",
+            xsens_motion=_motion(),
+            hdf5_path=Path("recording.hdf5"),
+            morphology_config=XsensMorphologyConfig(),
+        )
+
+
 def test_g1_mode_rejects_unsupported_task_or_robot() -> None:
     with pytest.raises(ValueError, match="robot_only"):
         robot_retarget.validate_xsens_morphology_selection(
@@ -347,7 +462,7 @@ def test_tyro_parses_nested_root_motion_configuration() -> None:
     assert config.xsens_morphology.root_motion.contact_height_tolerance_m == pytest.approx(0.04)
 
 
-def test_tyro_parses_arm_orientation_mode_and_optimization_schedule() -> None:
+def test_tyro_parses_arm_orientation_mode_schedule_and_initialization() -> None:
     config = tyro.cli(
         RetargetingConfig,
         args=[
@@ -355,6 +470,8 @@ def test_tyro_parses_arm_orientation_mode_and_optimization_schedule() -> None:
             "frame-and-bend",
             "--retargeter.optimization-schedule",
             "orientation-first",
+            "--retargeter.initialization-mode",
+            "multi-start",
             "--retargeter.orientation-first-iterations",
             "24",
         ],
@@ -362,4 +479,5 @@ def test_tyro_parses_arm_orientation_mode_and_optimization_schedule() -> None:
 
     assert config.retargeter.orientation.arm_mode == "frame-and-bend"
     assert config.retargeter.optimization_schedule == "orientation-first"
+    assert config.retargeter.initialization_mode == "multi-start"
     assert config.retargeter.orientation_first_iterations == 24

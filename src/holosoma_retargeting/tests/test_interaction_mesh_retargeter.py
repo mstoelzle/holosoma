@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import Mock
 
 import cvxpy as cp
@@ -15,6 +16,7 @@ from cvxpy.lin_ops import lin_utils
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
+    InitializationMode,
     OrientationTrackingConfig,
     RetargeterConfig,
 )
@@ -145,6 +147,7 @@ def _frame_and_bend_arm_targets(
 def _motion_retargeter(
     *,
     optimization_schedule: str,
+    initialization_mode: str = "warm-start",
     arm_orientation_mode: str = "longitudinal-axes",
 ) -> InteractionMeshRetargeter:
     retargeter = object.__new__(InteractionMeshRetargeter)
@@ -159,6 +162,7 @@ def _motion_retargeter(
     retargeter.smplh_mapped_joint_indices = np.array([0], dtype=int)
     retargeter.orientation_config = OrientationTrackingConfig(arm_mode=arm_orientation_mode)
     retargeter.optimization_schedule = optimization_schedule
+    retargeter.initialization_mode = initialization_mode
     retargeter.orientation_first_iterations = 4
     retargeter.w_nominal_tracking_init = 5.0
     retargeter.nominal_tracking_tau = 10.0
@@ -166,6 +170,7 @@ def _motion_retargeter(
     retargeter.iterations_per_frame = 2
     retargeter.debug = False
     retargeter.visualize = False
+    retargeter.multistart_diagnostics = []
     retargeter._orientation_tracking_errors = lambda *_args, **_kwargs: (np.zeros(1), np.zeros(1))
     return retargeter
 
@@ -176,6 +181,9 @@ def _run_stub_motion(
     tmp_path: Path,
     targets: XsensOrientationTargets,
     tennis_racket_targets=None,
+    *,
+    frame_times_s: np.ndarray | None = None,
+    calibrated_tpose_qpos: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[dict]]:
     calls: list[dict] = []
 
@@ -207,6 +215,8 @@ def _run_stub_motion(
         q_a_init=np.zeros(2),
         orientation_targets=targets,
         tennis_racket_targets=tennis_racket_targets,
+        frame_times_s=frame_times_s,
+        calibrated_tpose_qpos=calibrated_tpose_qpos,
         dest_res_path=tmp_path / "retargeted.npz",
     )
     return result, calls
@@ -319,8 +329,281 @@ def test_optimization_schedule_defaults_to_single_stage() -> None:
     config = RetargeterConfig()
 
     assert config.optimization_schedule == "single-stage"
+    assert config.initialization_mode == "warm-start"
     assert config.orientation_first_iterations == 20
     assert config.orientation.arm_mode == "auto"
+
+
+def test_retargeter_rejects_unknown_initialization_mode() -> None:
+    with pytest.raises(ValueError, match="initialization mode"):
+        RetargeterConfig(initialization_mode=cast("InitializationMode", "unknown"))
+
+
+@pytest.mark.parametrize(
+    ("optimization_schedule", "expected_position_flags", "expected_result"),
+    [
+        ("single-stage", [True], 10.0),
+        ("orientation-first", [False, True], 11.0),
+    ],
+)
+def test_candidate_pipeline_respects_schedule_and_temporal_reference(
+    optimization_schedule: str,
+    expected_position_flags: list[bool],
+    expected_result: float,
+) -> None:
+    retargeter = _motion_retargeter(optimization_schedule=optimization_schedule)
+    calls: list[dict] = []
+
+    def fake_iterate(**kwargs):
+        calls.append(kwargs)
+        q = np.copy(kwargs["q_n"])
+        q[retargeter.q_a_indices] += 1.0 if kwargs.get("include_position_tracking") is False else 10.0
+        return q, 2.0
+
+    retargeter.iterate = fake_iterate
+    retargeter._exact_candidate_score = lambda **kwargs: float(np.sum(kwargs["q"] ** 2))
+    temporal_reference = np.arange(retargeter.nq, dtype=float)
+    targets = _orientation_targets(1)
+
+    result = retargeter._solve_candidate_pipeline(
+        candidate_index=2,
+        candidate_name="test-seed",
+        seed=np.zeros(retargeter.nq),
+        q_locked=np.zeros(retargeter.nq),
+        q_t_last=temporal_reference,
+        target_laplacian=np.zeros((1, 3)),
+        adj_list=[],
+        obj_pts_local=np.zeros((1, 3)),
+        foot_sticking={"left": False, "right": False},
+        w_nominal_tracking=5.0,
+        q_a_nominal=None,
+        orientation_targets=targets,
+        init_t=False,
+        full_iterations=2,
+        frame_idx=0,
+    )
+
+    assert [call.get("include_position_tracking", True) for call in calls] == expected_position_flags
+    assert all(call["q_t_last"] is temporal_reference for call in calls)
+    assert result.index == 2
+    assert result.name == "test-seed"
+    np.testing.assert_allclose(result.q[retargeter.q_a_indices], expected_result)
+    if optimization_schedule == "orientation-first":
+        np.testing.assert_allclose(calls[1]["q_n"][retargeter.q_a_indices], 1.0)
+        assert calls[0]["n_iter"] == retargeter.orientation_first_iterations
+        assert calls[1]["n_iter"] == retargeter.orientation_first_iterations
+
+
+def test_multistart_seed_construction_preserves_non_arm_state_and_history() -> None:
+    retargeter = object.__new__(InteractionMeshRetargeter)
+    retargeter.q_a_indices = np.arange(20, dtype=int)
+    retargeter.q_a_lb = np.full(20, -100.0)
+    retargeter.q_a_ub = np.full(20, 100.0)
+    retargeter._arm_qpos_indices = lambda: np.arange(14, dtype=int)
+
+    accepted_q = []
+    for arm_value in (0.0, 1.0, 2.0):
+        q = np.full(20, 50.0)
+        q[:14] = arm_value
+        accepted_q.append(q)
+    previous_q = accepted_q[-1]
+    calibrated_tpose = np.arange(20, dtype=float) + 10.0
+
+    seeds = dict(
+        retargeter._build_multistart_seeds(
+            previous_q=previous_q,
+            accepted_q=accepted_q,
+            accepted_times_s=np.array([0.0, 0.25, 0.5]),
+            current_time_s=0.75,
+            calibrated_tpose_qpos=calibrated_tpose,
+            lag_s=0.5,
+        )
+    )
+
+    assert list(seeds) == ["previous", "t-pose", "n-pose", "lagged", "constant-velocity"]
+    for seed in seeds.values():
+        np.testing.assert_allclose(seed[14:], previous_q[14:])
+    np.testing.assert_allclose(seeds["previous"][:14], 2.0)
+    np.testing.assert_allclose(seeds["t-pose"][:14], calibrated_tpose[:14])
+    expected_npose = calibrated_tpose[:14].copy()
+    expected_npose[[1, 8]] = 0.0
+    np.testing.assert_allclose(seeds["n-pose"][:14], expected_npose)
+    np.testing.assert_allclose(seeds["lagged"][:14], 1.0)
+    np.testing.assert_allclose(seeds["constant-velocity"][:14], 3.0)
+
+    startup_names = [
+        name
+        for name, _ in retargeter._build_multistart_seeds(
+            previous_q=previous_q,
+            accepted_q=[],
+            accepted_times_s=np.zeros(0),
+            current_time_s=0.0,
+            calibrated_tpose_qpos=calibrated_tpose,
+        )
+    ]
+    assert startup_names == ["previous", "t-pose", "n-pose"]
+
+
+def test_exact_candidate_score_contains_active_static_objectives_but_not_smoothness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retargeter = object.__new__(InteractionMeshRetargeter)
+    retargeter.laplacian_match_links = {"tracked": "robot_link"}
+    retargeter.object_name = "ground"
+    retargeter.laplacian_weights = 2.0
+    retargeter.q_a_indices = np.array([0, 1], dtype=int)
+    retargeter.Q_diag = np.array([1.0, 2.0])
+    retargeter.track_nominal_indices = [1]
+    retargeter.smooth_weight = 1e9
+    retargeter.robot_model = object()
+    retargeter.robot_data = SimpleNamespace(qpos=np.zeros(2))
+    retargeter._calc_manipulator_jacobians = lambda *_args, **_kwargs: (
+        {},
+        {"tracked": np.array([1.0, 2.0, 3.0])},
+        {},
+    )
+    monkeypatch.setattr(retargeter_module, "calculate_laplacian_coordinates", lambda vertices, _adj: vertices)
+    monkeypatch.setattr(retargeter_module.mujoco, "mj_forward", lambda *_args: None)
+
+    score = retargeter._exact_candidate_score(
+        q=np.array([2.0, 3.0]),
+        target_laplacian=np.zeros((2, 3)),
+        adj_list=[],
+        obj_pts_local=np.array([[4.0, 5.0, 6.0]]),
+        orientation_targets=None,
+        frame_idx=0,
+        w_nominal_tracking=3.0,
+        q_a_nominal=np.array([0.0, 1.0]),
+    )
+
+    # Position: 2 * (1^2 + ... + 6^2) = 182; Q = 22; nominal = 12.
+    assert score == pytest.approx(216.0)
+
+
+class _CandidateWorkerStub:
+    def __init__(self, scores: dict[str, float], failures: set[str] | None = None):
+        self.scores = scores
+        self.failures = set() if failures is None else failures
+
+    def _solve_candidate_pipeline(self, *, candidate_index, candidate_name, seed, **_kwargs):
+        if candidate_name in self.failures:
+            raise RuntimeError(f"failed {candidate_name}")
+        return retargeter_module._CandidateResult(
+            candidate_index,
+            candidate_name,
+            np.asarray(seed, dtype=float).copy(),
+            self.scores[candidate_name],
+            0.0,
+        )
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_multistart_selection_is_deterministic_and_isolates_failures(parallel: bool) -> None:
+    retargeter = object.__new__(InteractionMeshRetargeter)
+    seeds = [("first", np.array([1.0])), ("second", np.array([2.0])), ("failed", np.array([3.0]))]
+    scores = {"first": 1.0, "second": 1.0, "failed": 0.0}
+    workers = [_CandidateWorkerStub(scores, {"failed"}) for _ in seeds]
+
+    selected, results, failures = retargeter._evaluate_multistart_candidates(
+        workers=workers,
+        seeds=seeds,
+        parallel=parallel,
+    )
+
+    assert selected.name == "first"
+    assert [result.name for result in results] == ["first", "second"]
+    assert failures == [{"name": "failed", "error": "RuntimeError: failed failed"}]
+
+
+def test_multistart_fails_frame_only_when_every_candidate_fails() -> None:
+    retargeter = object.__new__(InteractionMeshRetargeter)
+    seeds = [("first", np.array([1.0])), ("second", np.array([2.0]))]
+    workers = [_CandidateWorkerStub({}, {"first", "second"}) for _ in seeds]
+
+    with pytest.raises(RuntimeError, match="All multi-start candidates failed"):
+        retargeter._evaluate_multistart_candidates(workers=workers, seeds=seeds, parallel=True)
+
+
+@pytest.mark.parametrize("optimization_schedule", ["single-stage", "orientation-first"])
+def test_multistart_propagates_only_the_selected_refined_pose(
+    optimization_schedule: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retargeter = _motion_retargeter(
+        optimization_schedule=optimization_schedule,
+        initialization_mode="multi-start",
+    )
+    retargeter._arm_qpos_indices = lambda: np.array([0, 1], dtype=int)
+    retargeter._new_candidate_worker = object
+    seed_inputs: list[tuple[np.ndarray, list[np.ndarray]]] = []
+    temporal_references: list[np.ndarray] = []
+
+    def fake_build_seeds(*, previous_q, accepted_q, **_kwargs):
+        seed_inputs.append(
+            (
+                np.asarray(previous_q, dtype=float).copy(),
+                [np.asarray(q, dtype=float).copy() for q in accepted_q],
+            )
+        )
+        return [("previous", np.asarray(previous_q, dtype=float).copy())]
+
+    def fake_evaluate(*, seeds, q_t_last, **_kwargs):
+        temporal_references.append(np.asarray(q_t_last, dtype=float).copy())
+        refined = np.asarray(seeds[0][1], dtype=float).copy()
+        refined[retargeter.q_a_indices] += 7.0
+        selected = retargeter_module._CandidateResult(0, "previous", refined, 0.0, 0.0)
+        return selected, [selected], []
+
+    monkeypatch.setattr(retargeter, "_build_multistart_seeds", fake_build_seeds)
+    monkeypatch.setattr(retargeter, "_evaluate_multistart_candidates", fake_evaluate)
+
+    result, solve_calls = _run_stub_motion(
+        retargeter,
+        monkeypatch,
+        tmp_path,
+        _orientation_targets(2),
+        frame_times_s=np.array([0.0, 0.1]),
+        calibrated_tpose_qpos=np.zeros(retargeter.nq),
+    )
+
+    assert solve_calls == []
+    np.testing.assert_allclose(result[:, :2], [[7.0, 7.0], [14.0, 14.0]])
+    np.testing.assert_allclose(seed_inputs[0][0][:2], [0.0, 0.0])
+    assert seed_inputs[0][1] == []
+    np.testing.assert_allclose(seed_inputs[1][0][:2], [7.0, 7.0])
+    assert len(seed_inputs[1][1]) == 1
+    np.testing.assert_allclose(seed_inputs[1][1][0][:2], [7.0, 7.0])
+    np.testing.assert_allclose(temporal_references[0][:2], [0.0, 0.0])
+    np.testing.assert_allclose(temporal_references[1][:2], [7.0, 7.0])
+
+
+def test_multistart_worker_has_independent_solver_and_mujoco_state() -> None:
+    robot_urdf = str(MODEL_DIR / "g1_29dof.urdf")
+    constants = create_task_constants(
+        robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
+        motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
+        task_config=TaskConfig(),
+        task_type="robot_only",
+    )
+    retargeter = InteractionMeshRetargeter(
+        task_constants=constants,
+        object_urdf_path=None,
+        activate_foot_sticking=False,
+        activate_obj_non_penetration=False,
+        initialization_mode="multi-start",
+    )
+
+    worker = retargeter._new_candidate_worker()
+
+    assert worker is not retargeter
+    assert worker.robot_model is not retargeter.robot_model
+    assert worker.robot_data is not retargeter.robot_data
+    assert worker.optimization_schedule == retargeter.optimization_schedule
+    assert worker.initialization_mode == "warm-start"
+    parent_qpos = retargeter.robot_data.qpos.copy()
+    worker.robot_data.qpos[0] += 1.0
+    np.testing.assert_array_equal(retargeter.robot_data.qpos, parent_qpos)
 
 
 @pytest.mark.parametrize("iterations", [0, -1])
@@ -516,6 +799,66 @@ def test_orientation_first_uses_racket_override_in_both_stages(
     assert calls[1]["orientation_rotation_override"] is override
 
 
+def test_multistart_forwards_racket_override_to_candidate_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    retargeter = _motion_retargeter(
+        optimization_schedule="orientation-first",
+        initialization_mode="multi-start",
+    )
+    retargeter._arm_qpos_indices = lambda: np.array([0, 1], dtype=int)
+    retargeter._new_candidate_worker = object
+    override = (0, np.eye(3))
+    seen_overrides: list[tuple[int, np.ndarray] | None] = []
+
+    def fake_evaluate(*, seeds, orientation_rotation_override, **_kwargs):
+        seen_overrides.append(orientation_rotation_override)
+        refined = np.asarray(seeds[0][1], dtype=float).copy()
+        refined[retargeter.q_a_indices] += 7.0
+        selected = retargeter_module._CandidateResult(0, "previous", refined, 0.0, 0.0)
+        return selected, [selected], []
+
+    def fake_build_seeds(*, previous_q, **_kwargs):
+        return [("previous", np.asarray(previous_q, dtype=float).copy())]
+
+    class _RacketTracker:
+        config = SimpleNamespace(mode="racket")
+
+        def solve_frame(self, _frame_index, _q, solve_frame):
+            q, cost = solve_frame(orientation_rotation_override=override)
+            return SimpleNamespace(q=q, cost=cost, orientation_override=override)
+
+        def record_frame(self, _frame_index, _solution) -> None:
+            pass
+
+        def build_motion(self):
+            return SimpleNamespace(as_npz_payload=dict)
+
+    monkeypatch.setattr(retargeter, "_build_multistart_seeds", fake_build_seeds)
+    monkeypatch.setattr(retargeter, "_evaluate_multistart_candidates", fake_evaluate)
+    monkeypatch.setattr(
+        retargeter_module,
+        "create_tennis_racket_frame_tracker",
+        lambda *_args, **_kwargs: _RacketTracker(),
+    )
+    result, solve_calls = _run_stub_motion(
+        retargeter,
+        monkeypatch,
+        tmp_path,
+        _orientation_targets(1),
+        tennis_racket_targets=object(),
+        frame_times_s=np.array([0.0]),
+        calibrated_tpose_qpos=np.zeros(retargeter.nq),
+    )
+
+    assert solve_calls == []
+    assert len(seen_overrides) == 1
+    assert seen_overrides[0] is override
+    np.testing.assert_allclose(result[0, :2], [7.0, 7.0])
+    assert retargeter.multistart_diagnostics[0]["selected"] == "previous"
+
+
 def test_coarse_solve_excludes_position_tracking_but_keeps_orientation_terms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -579,6 +922,42 @@ def test_coarse_solve_excludes_position_tracking_but_keeps_orientation_terms(
     # Q-diagonal regularization + temporal smoothness + full orientation + axis.
     # The three retained constraints are lower limits, upper limits, and step size.
     assert problem_shapes == [(4, 3)]
+    assert np.isfinite(cost)
+
+
+def test_single_iteration_uses_canonicalizer_without_32_bit_id_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    robot_urdf = str(MODEL_DIR / "g1_29dof.urdf")
+    constants = create_task_constants(
+        robot_config=RobotConfig(robot_type="g1", robot_urdf_file=robot_urdf),
+        motion_data_config=MotionDataConfig(data_format="xsens", robot_type="g1"),
+        task_config=TaskConfig(),
+        task_type="robot_only",
+    )
+    retargeter = InteractionMeshRetargeter(
+        task_constants=constants,
+        object_urdf_path=None,
+        activate_foot_sticking=False,
+        activate_obj_non_penetration=False,
+    )
+    q = retargeter.robot_model.qpos0.copy()
+
+    int32_max = int(np.iinfo(np.int32).max)
+    monkeypatch.setattr(lin_utils.ID_COUNTER, "count", int32_max - 16)
+
+    _, cost = retargeter.solve_single_iteration(
+        q_locked=q,
+        q_a_n_last=q[retargeter.q_a_indices],
+        q_t_last=q,
+        target_laplacian=np.zeros((0, 3)),
+        adj_list=[],
+        obj_pts_local=np.zeros((0, 3)),
+        foot_sticking={"left": False, "right": False},
+        include_position_tracking=False,
+    )
+
+    assert lin_utils.ID_COUNTER.count > int32_max
     assert np.isfinite(cost)
 
 

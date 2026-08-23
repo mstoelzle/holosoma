@@ -24,6 +24,8 @@ def _retargeter(*, fail_at_frame: int | None = None) -> InteractionMeshRetargete
         tennis_racket=SimpleNamespace(mode="hand"),
     )
     retargeter.optimization_schedule = "single-stage"
+    retargeter.initialization_mode = "warm-start"
+    retargeter.multistart_diagnostics = []
     retargeter.activate_joint_limits = True
     retargeter.object_name = "ground"
     retargeter.smplh_mapped_joint_indices = np.arange(2, dtype=int)

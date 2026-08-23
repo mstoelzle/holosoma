@@ -17,6 +17,9 @@ before the retargeter is constructed.
 OptimizationSchedule: TypeAlias = Literal["single-stage", "orientation-first"]
 """Available per-frame optimization schedules."""
 
+InitializationMode: TypeAlias = Literal["warm-start", "multi-start"]
+"""Available per-frame optimizer initialization strategies."""
+
 
 @dataclass(frozen=True)
 class FootLockConfig:
@@ -200,6 +203,9 @@ class RetargeterConfig:
     optimization_schedule: OptimizationSchedule = "single-stage"
     """Per-frame solve schedule."""
 
+    initialization_mode: InitializationMode = "warm-start"
+    """Per-frame initialization strategy, independent of the solve schedule."""
+
     orientation_first_iterations: int = 20
     """Coarse-stage iterations and minimum final-stage budget when orientation-first."""
 
@@ -212,5 +218,7 @@ class RetargeterConfig:
     def __post_init__(self) -> None:
         if self.optimization_schedule not in {"single-stage", "orientation-first"}:
             raise ValueError(f"Unsupported optimization schedule: {self.optimization_schedule}")
+        if self.initialization_mode not in {"warm-start", "multi-start"}:
+            raise ValueError(f"Unsupported initialization mode: {self.initialization_mode}")
         if self.orientation_first_iterations <= 0:
             raise ValueError("orientation_first_iterations must be positive")

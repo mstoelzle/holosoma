@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -19,6 +21,7 @@ from viser.extras import ViserUrdf  # type: ignore[import-not-found]
 
 from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
+    InitializationMode,
     OptimizationSchedule,
     OrientationTrackingConfig,
     SelfCollisionConfig,
@@ -69,6 +72,17 @@ def _solve_with_clarabel(problem: cp.Problem, *, verbose: bool) -> None:
     )
 
 
+@dataclass(frozen=True)
+class _CandidateResult:
+    """A successfully refined multi-start candidate."""
+
+    index: int
+    name: str
+    q: np.ndarray
+    score: float
+    solver_cost: float
+
+
 class InteractionMeshRetargeter:
     """
     A class to perform kinematic retargeting from human motion to a robot,
@@ -93,6 +107,7 @@ class InteractionMeshRetargeter:
         self_collision: SelfCollisionConfig | None = None,
         orientation: OrientationTrackingConfig | None = None,
         optimization_schedule: OptimizationSchedule = "single-stage",
+        initialization_mode: InitializationMode = "warm-start",
         orientation_first_iterations: int = 20,
         visualize: bool = False,
         debug: bool = False,
@@ -154,6 +169,9 @@ class InteractionMeshRetargeter:
         if optimization_schedule not in {"single-stage", "orientation-first"}:
             raise ValueError(f"Unsupported optimization schedule: {optimization_schedule}")
         self.optimization_schedule = optimization_schedule
+        if initialization_mode not in {"warm-start", "multi-start"}:
+            raise ValueError(f"Unsupported initialization mode: {initialization_mode}")
+        self.initialization_mode = initialization_mode
         if orientation_first_iterations <= 0:
             raise ValueError("orientation_first_iterations must be positive")
         self.orientation_first_iterations = orientation_first_iterations
@@ -225,6 +243,31 @@ class InteractionMeshRetargeter:
         self.w_nominal_tracking_init = w_nominal_tracking_init
         self.nominal_tracking_tau = nominal_tracking_tau
         self.track_nominal_indices = task_constants.NOMINAL_TRACKING_INDICES
+        self._worker_constructor_kwargs = {
+            "task_constants": task_constants,
+            "object_urdf_path": object_urdf_path,
+            "q_a_init_idx": q_a_init_idx,
+            "activate_foot_sticking": activate_foot_sticking,
+            "activate_obj_non_penetration": activate_obj_non_penetration,
+            "activate_joint_limits": activate_joint_limits,
+            "step_size": step_size,
+            "initial_iterations": initial_iterations,
+            "iterations_per_frame": iterations_per_frame,
+            "collision_detection_threshold": collision_detection_threshold,
+            "penetration_tolerance": penetration_tolerance,
+            "foot_sticking_tolerance": foot_sticking_tolerance,
+            "foot_lock": foot_lock,
+            "self_collision": self_collision,
+            "orientation": self.orientation_config,
+            "optimization_schedule": optimization_schedule,
+            "initialization_mode": "warm-start",
+            "orientation_first_iterations": orientation_first_iterations,
+            "visualize": False,
+            "debug": False,
+            "w_nominal_tracking_init": w_nominal_tracking_init,
+            "nominal_tracking_tau": nominal_tracking_tau,
+        }
+        self.multistart_diagnostics: list[dict[str, Any]] = []
 
     def _init_foot_lock(self, foot_lock: FootLockConfig | None) -> None:
         """Initialize foot lock configuration and normalize window mappings."""
@@ -425,6 +468,284 @@ class InteractionMeshRetargeter:
             self.draw_keypoints(q, name=f"{group_name}_q", rgba=(0.0, 1.0, 0.0, 1.0))
             self.draw_keypoints(c, name=f"{group_name}_c", rgba=(1.0, 0.0, 0.0, 1.0))
 
+    def _new_candidate_worker(self) -> InteractionMeshRetargeter:
+        """Construct an independent solver and MuJoCo context for one candidate slot."""
+
+        return type(self)(**self._worker_constructor_kwargs)
+
+    def _arm_qpos_indices(self) -> np.ndarray:
+        """Resolve the 14 G1 arm-joint qpos indices in a stable order."""
+
+        suffixes = (
+            "shoulder_pitch_joint",
+            "shoulder_roll_joint",
+            "shoulder_yaw_joint",
+            "elbow_joint",
+            "wrist_roll_joint",
+            "wrist_pitch_joint",
+            "wrist_yaw_joint",
+        )
+        indices: list[int] = []
+        for side in ("left", "right"):
+            for suffix in suffixes:
+                name = f"{side}_{suffix}"
+                joint_id = mujoco.mj_name2id(self.robot_model, mujoco.mjtObj.mjOBJ_JOINT, name)
+                if joint_id < 0:
+                    raise ValueError(f"Multi-start initialization requires G1 arm joint '{name}'")
+                qpos_index = int(self.robot_model.jnt_qposadr[joint_id])
+                if qpos_index not in self.q_a_indices:
+                    raise ValueError(f"Arm joint '{name}' is outside the optimized configuration slice")
+                indices.append(qpos_index)
+        return np.asarray(indices, dtype=int)
+
+    def _clip_arm_seed(self, q: np.ndarray, arm_indices: np.ndarray) -> np.ndarray:
+        """Clip seeded arm joints to the active hard joint bounds."""
+
+        result = np.asarray(q, dtype=float).copy()
+        q_a_lookup = {int(q_idx): i for i, q_idx in enumerate(self.q_a_indices)}
+        for q_idx in arm_indices:
+            active_idx = q_a_lookup[int(q_idx)]
+            result[q_idx] = np.clip(result[q_idx], self.q_a_lb[active_idx], self.q_a_ub[active_idx])
+        return result
+
+    def _build_multistart_seeds(
+        self,
+        *,
+        previous_q: np.ndarray,
+        accepted_q: list[np.ndarray],
+        accepted_times_s: np.ndarray,
+        current_time_s: float,
+        calibrated_tpose_qpos: np.ndarray,
+        lag_s: float = 1.0,
+    ) -> list[tuple[str, np.ndarray]]:
+        """Build arm-only alternatives while preserving the accepted non-arm state."""
+
+        arm_indices = self._arm_qpos_indices()
+        tpose = np.asarray(calibrated_tpose_qpos, dtype=float).reshape(-1)
+        if tpose.shape[0] <= int(np.max(arm_indices)):
+            raise ValueError("Calibrated T-pose does not contain all G1 arm joints")
+
+        def arm_only_seed(arm_source: np.ndarray) -> np.ndarray:
+            seed = np.asarray(previous_q, dtype=float).copy()
+            seed[arm_indices] = np.asarray(arm_source, dtype=float)[arm_indices]
+            return self._clip_arm_seed(seed, arm_indices)
+
+        seeds: list[tuple[str, np.ndarray]] = [("previous", np.asarray(previous_q, dtype=float).copy())]
+        seeds.append(("t-pose", arm_only_seed(tpose)))
+
+        npose = tpose.copy()
+        # ``arm_indices`` is ordered as seven left-arm joints followed by seven
+        # right-arm joints.  Shoulder roll is the second joint on either side.
+        npose[arm_indices[[1, 8]]] = 0.0
+        seeds.append(("n-pose", arm_only_seed(npose)))
+
+        prior_times = np.asarray(accepted_times_s, dtype=float)
+        if prior_times.size:
+            lag_index = int(np.searchsorted(prior_times, current_time_s - lag_s, side="right") - 1)
+            if lag_index >= 0:
+                seeds.append(("lagged", arm_only_seed(accepted_q[lag_index])))
+
+        if len(accepted_q) >= 2:
+            history_dt = float(prior_times[-1] - prior_times[-2])
+            prediction_dt = float(current_time_s - prior_times[-1])
+            if history_dt > 1e-9 and prediction_dt >= 0.0:
+                velocity_source = np.asarray(accepted_q[-1], dtype=float).copy()
+                velocity_source[arm_indices] += (prediction_dt / history_dt) * (
+                    np.asarray(accepted_q[-1])[arm_indices] - np.asarray(accepted_q[-2])[arm_indices]
+                )
+                seeds.append(("constant-velocity", arm_only_seed(velocity_source)))
+        return seeds
+
+    def _exact_candidate_score(
+        self,
+        *,
+        q: np.ndarray,
+        target_laplacian: np.ndarray,
+        adj_list: list[list[int]],
+        obj_pts_local: np.ndarray,
+        orientation_targets: XsensOrientationTargets | None,
+        frame_idx: int,
+        w_nominal_tracking: float,
+        q_a_nominal: np.ndarray | None,
+        orientation_rotation_override: tuple[int, np.ndarray] | None = None,
+    ) -> float:
+        """Evaluate active nonlinear tracking losses, excluding temporal smoothness."""
+
+        score = 0.0
+        _jacobians, positions, _ = self._calc_manipulator_jacobians(
+            q,
+            links=self.laplacian_match_links,
+            obj_frame=(self.object_name != "ground"),
+        )
+        robot_points = np.asarray([positions[key] for key in self.laplacian_match_links], dtype=float)
+        vertices = np.vstack([robot_points, obj_pts_local])
+        laplacian = calculate_laplacian_coordinates(vertices, adj_list)
+        score += self.laplacian_weights * float(np.sum((laplacian - target_laplacian) ** 2))
+
+        self.robot_data.qpos[:] = q
+        mujoco.mj_forward(self.robot_model, self.robot_data)
+        if orientation_targets is not None:
+            for target_idx, link_name in enumerate(orientation_targets.orientation_robot_link_names):
+                target_rotation = (
+                    orientation_rotation_override[1]
+                    if orientation_rotation_override is not None and target_idx == orientation_rotation_override[0]
+                    else orientation_targets.orientation_target_rotations[frame_idx, target_idx]
+                )
+                _, current_rotation, _ = self._frame_pose(link_name)
+                residual = Rotation.from_matrix(target_rotation @ current_rotation.T).as_rotvec()
+                residual = self._clip_rotvec(residual)
+                score += self.orientation_config.orientation_weight * float(np.dot(residual, residual))
+            for axis_idx in range(len(orientation_targets.axis_names)):
+                current_axis, _ = self._target_axis_jacobian(orientation_targets, axis_idx)
+                target_axis = orientation_targets.axis_target_vectors[frame_idx, axis_idx]
+                residual = current_axis - target_axis
+                weight = self.orientation_config.axis_weight * float(orientation_targets.axis_weights[axis_idx])
+                score += weight * float(np.dot(residual, residual))
+            for elbow_idx in range(len(orientation_targets.elbow_bend_names)):
+                current_cosine, _ = self._elbow_bend_cosine_jacobian(
+                    orientation_targets.elbow_bend_robot_shoulder_link_names[elbow_idx],
+                    orientation_targets.elbow_bend_robot_elbow_link_names[elbow_idx],
+                    orientation_targets.elbow_bend_robot_wrist_link_names[elbow_idx],
+                )
+                target_cosine = orientation_targets.elbow_bend_target_cosines[frame_idx, elbow_idx]
+                weight = self.orientation_config.axis_weight * float(orientation_targets.elbow_bend_weights[elbow_idx])
+                score += weight * float((current_cosine - target_cosine) ** 2)
+
+        q_a = np.asarray(q, dtype=float)[self.q_a_indices]
+        score += float(np.sum(np.asarray(self.Q_diag, dtype=float) * q_a**2))
+        if w_nominal_tracking > 0.0 and q_a_nominal is not None:
+            idx = np.asarray(self.track_nominal_indices, dtype=int)
+            if idx.size:
+                score += w_nominal_tracking * float(np.sum((q_a[idx] - q_a_nominal[idx]) ** 2))
+        return float(score)
+
+    def _solve_candidate_pipeline(
+        self,
+        *,
+        candidate_index: int,
+        candidate_name: str,
+        seed: np.ndarray,
+        q_locked: np.ndarray,
+        q_t_last: np.ndarray,
+        target_laplacian: np.ndarray,
+        adj_list: list[list[int]],
+        obj_pts_local: np.ndarray,
+        foot_sticking: tuple[bool, bool],
+        w_nominal_tracking: float,
+        q_a_nominal: np.ndarray | None,
+        orientation_targets: XsensOrientationTargets | None,
+        init_t: bool,
+        full_iterations: int,
+        frame_idx: int,
+        orientation_rotation_override: tuple[int, np.ndarray] | None = None,
+    ) -> _CandidateResult:
+        """Run one schedule from one seed, then score the refined pose."""
+
+        q = np.asarray(seed, dtype=float).copy()
+        if self.optimization_schedule == "orientation-first":
+            assert orientation_targets is not None
+            q, _ = self.iterate(
+                q_locked=q_locked,
+                q_n=q,
+                q_t_last=q_t_last,
+                target_laplacian=target_laplacian,
+                adj_list=adj_list,
+                obj_pts_local=obj_pts_local,
+                foot_sticking=foot_sticking,
+                orientation_targets=orientation_targets,
+                orientation_rotation_override=orientation_rotation_override,
+                init_t=init_t,
+                n_iter=self.orientation_first_iterations,
+                frame_idx=frame_idx,
+                include_position_tracking=False,
+            )
+            full_iterations = max(full_iterations, self.orientation_first_iterations)
+        q, solver_cost = self.iterate(
+            q_locked=q_locked,
+            q_n=q,
+            q_t_last=q_t_last,
+            target_laplacian=target_laplacian,
+            adj_list=adj_list,
+            obj_pts_local=obj_pts_local,
+            foot_sticking=foot_sticking,
+            w_nominal_tracking=w_nominal_tracking,
+            q_a_nominal=q_a_nominal,
+            orientation_targets=orientation_targets,
+            orientation_rotation_override=orientation_rotation_override,
+            init_t=init_t,
+            n_iter=full_iterations,
+            frame_idx=frame_idx,
+        )
+        if not np.all(np.isfinite(q)) or not np.isfinite(solver_cost):
+            raise RuntimeError("Candidate returned non-finite output")
+        score = self._exact_candidate_score(
+            q=q,
+            target_laplacian=target_laplacian,
+            adj_list=adj_list,
+            obj_pts_local=obj_pts_local,
+            orientation_targets=orientation_targets,
+            orientation_rotation_override=orientation_rotation_override,
+            frame_idx=frame_idx,
+            w_nominal_tracking=w_nominal_tracking,
+            q_a_nominal=q_a_nominal,
+        )
+        if not np.isfinite(score):
+            raise RuntimeError("Candidate returned a non-finite exact score")
+        return _CandidateResult(candidate_index, candidate_name, q, score, float(solver_cost))
+
+    def _evaluate_multistart_candidates(
+        self,
+        *,
+        workers: list[InteractionMeshRetargeter],
+        seeds: list[tuple[str, np.ndarray]],
+        parallel: bool = True,
+        **pipeline_kwargs: Any,
+    ) -> tuple[_CandidateResult, list[_CandidateResult], list[dict[str, str]]]:
+        """Evaluate candidates independently and select deterministically by exact score."""
+
+        if len(workers) < len(seeds):
+            raise ValueError("Each concurrent multi-start candidate requires an independent worker")
+        results: list[_CandidateResult] = []
+        failures: list[dict[str, str]] = []
+
+        def run(index: int) -> _CandidateResult:
+            name, seed = seeds[index]
+            return workers[index]._solve_candidate_pipeline(
+                candidate_index=index,
+                candidate_name=name,
+                seed=seed,
+                **pipeline_kwargs,
+            )
+
+        def run_safely(index: int) -> tuple[_CandidateResult | None, dict[str, str] | None]:
+            try:
+                return run(index), None
+            except Exception as exc:
+                return None, {"name": seeds[index][0], "error": f"{type(exc).__name__}: {exc}"}
+
+        if parallel and len(seeds) > 1:
+            with ThreadPoolExecutor(max_workers=len(seeds), thread_name_prefix="retarget-candidate") as executor:
+                futures = {executor.submit(run, index): index for index in range(len(seeds))}
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        results.append(future.result())
+                    except Exception as exc:
+                        failures.append({"name": seeds[index][0], "error": f"{type(exc).__name__}: {exc}"})
+        else:
+            for index in range(len(seeds)):
+                result, failure = run_safely(index)
+                if result is not None:
+                    results.append(result)
+                if failure is not None:
+                    failures.append(failure)
+        if not results:
+            details = "; ".join(f"{failure['name']}: {failure['error']}" for failure in failures)
+            raise RuntimeError(f"All multi-start candidates failed ({details})")
+        results.sort(key=lambda result: result.index)
+        failures.sort(key=lambda failure: next(i for i, seed in enumerate(seeds) if seed[0] == failure["name"]))
+        return min(results, key=lambda result: (result.score, result.index)), results, failures
+
     def retarget_motion(
         self,
         human_joint_motions,
@@ -437,6 +758,8 @@ class InteractionMeshRetargeter:
         q_nominal_list=None,
         orientation_targets: XsensOrientationTargets | None = None,
         tennis_racket_targets: TennisRacketTargets | None = None,
+        frame_times_s: np.ndarray | None = None,
+        calibrated_tpose_qpos: np.ndarray | None = None,
         original=True,
         dest_res_path=None,
         checkpoint_interval_frames: int = 0,
@@ -461,6 +784,8 @@ class InteractionMeshRetargeter:
             checkpoint_interval_frames: Save a recovery sidecar after this many accepted frames.
                 Set to 0 to disable checkpointing.
             resume: Continue from a compatible sidecar checkpoint when one exists.
+            frame_times_s: Per-frame timestamps required by multi-start lag and velocity seeds.
+            calibrated_tpose_qpos: Calibrated G1 T-pose used for arm-only T/N seeds.
 
         Returns:
             tuple: (retargeted_motions, obj_pts_demo_list, obj_pts_list, tetrahedra)
@@ -476,6 +801,16 @@ class InteractionMeshRetargeter:
         if checkpoint_enabled and dest_res_path is None:
             raise ValueError("Checkpointing requires dest_res_path")
         checkpoint_path = checkpoint_path_for_result(dest_res_path) if checkpoint_enabled else None
+        if self.initialization_mode == "multi-start":
+            if calibrated_tpose_qpos is None:
+                raise ValueError("Multi-start initialization requires a calibrated G1 T-pose")
+            if frame_times_s is None:
+                raise ValueError("Multi-start initialization requires per-frame timestamps")
+            frame_times_s = np.asarray(frame_times_s, dtype=float)
+            if frame_times_s.shape != (num_frames,):
+                raise ValueError(f"frame_times_s must have shape ({num_frames},), got {frame_times_s.shape}")
+            if not np.all(np.isfinite(frame_times_s)) or np.any(np.diff(frame_times_s) <= 0.0):
+                raise ValueError("frame_times_s must be finite and strictly increasing")
         if orientation_targets is not None and not self.orientation_config.is_enabled:
             raise ValueError("orientation_targets were provided while orientation tracking is off")
         if self.orientation_config.is_enabled and orientation_targets is None:
@@ -681,6 +1016,11 @@ class InteractionMeshRetargeter:
         obj_kpts_handle_list = []
         robot_kpts_handle_list = []
 
+        self.multistart_diagnostics.clear()
+        candidate_workers = (
+            [self._new_candidate_worker() for _ in range(5)] if self.initialization_mode == "multi-start" else []
+        )
+
         print(f"\nStarting motion retargeting for {num_frames} frames...")
 
         with checkpoint_on_error(_write_checkpoint), tqdm(
@@ -746,6 +1086,11 @@ class InteractionMeshRetargeter:
                 frame_obj_pts_local = obj_pts_i
                 frame_w_nominal_tracking = w_nominal_tracking
                 frame_full_iterations = full_iterations
+                frame_accepted_q = tuple(retargeted_motions[1:])
+                frame_candidate_workers = candidate_workers
+                frame_multistart_diagnostics: dict[object, dict[str, Any]] = {}
+                frame_times = frame_times_s
+                frame_tpose_qpos = calibrated_tpose_qpos
 
                 def solve_frame(
                     *,
@@ -762,7 +1107,66 @@ class InteractionMeshRetargeter:
                     obj_pts_local_i: np.ndarray = frame_obj_pts_local,
                     nominal_weight: float = frame_w_nominal_tracking,
                     final_iterations: int = frame_full_iterations,
+                    accepted_q: tuple[np.ndarray, ...] = frame_accepted_q,
+                    workers: list[InteractionMeshRetargeter] = frame_candidate_workers,
+                    diagnostics: dict[object, dict[str, Any]] = frame_multistart_diagnostics,
+                    times_s: np.ndarray | None = frame_times,
+                    tpose_qpos: np.ndarray | None = frame_tpose_qpos,
                 ) -> tuple[np.ndarray, float]:
+                    if self.initialization_mode == "multi-start":
+                        assert times_s is not None
+                        assert tpose_qpos is not None
+                        seeds = self._build_multistart_seeds(
+                            previous_q=q_t_last,
+                            accepted_q=list(accepted_q),
+                            accepted_times_s=times_s[:frame_idx],
+                            current_time_s=float(times_s[frame_idx]),
+                            calibrated_tpose_qpos=tpose_qpos,
+                        )
+                        candidate_start = time.perf_counter()
+                        selected, candidate_results, candidate_failures = self._evaluate_multistart_candidates(
+                            workers=workers,
+                            seeds=seeds,
+                            q_locked=q_locked,
+                            q_t_last=q_t_last,
+                            target_laplacian=target_laplacian_i,
+                            adj_list=adj_list_i,
+                            obj_pts_local=obj_pts_local_i,
+                            foot_sticking=foot_sticking,
+                            w_nominal_tracking=nominal_weight,
+                            q_a_nominal=q_a_nominal,
+                            orientation_targets=orientation_targets,
+                            orientation_rotation_override=orientation_rotation_override,
+                            init_t=init_t,
+                            full_iterations=final_iterations,
+                            frame_idx=frame_idx,
+                        )
+                        arm_indices = self._arm_qpos_indices()
+                        pairwise_arm_distances = [
+                            float(np.linalg.norm(left.q[arm_indices] - right.q[arm_indices]))
+                            for left_idx, left in enumerate(candidate_results)
+                            for right in candidate_results[left_idx + 1 :]
+                        ]
+                        override_key = (
+                            None
+                            if orientation_rotation_override is None
+                            else (
+                                orientation_rotation_override[0],
+                                np.asarray(orientation_rotation_override[1], dtype=float).tobytes(),
+                            )
+                        )
+                        diagnostics[override_key] = {
+                            "frame": frame_idx,
+                            "selected": selected.name,
+                            "scores": {result.name: result.score for result in candidate_results},
+                            "failures": candidate_failures,
+                            "minimum_pairwise_arm_distance": (
+                                min(pairwise_arm_distances) if pairwise_arm_distances else None
+                            ),
+                            "elapsed_s": time.perf_counter() - candidate_start,
+                        }
+                        return selected.q.copy(), selected.solver_cost
+
                     q_candidate = np.copy(q_start)
                     if self.optimization_schedule == "orientation-first":
                         assert orientation_targets is not None
@@ -805,7 +1209,16 @@ class InteractionMeshRetargeter:
                     racket_solution = racket_tracker.solve_frame(i, q, solve_frame)
                     q, cost = racket_solution.q, racket_solution.cost
                     selected_override = racket_solution.orientation_override
-
+                if self.initialization_mode == "multi-start":
+                    selected_override_key = (
+                        None
+                        if selected_override is None
+                        else (
+                            selected_override[0],
+                            np.asarray(selected_override[1], dtype=float).tobytes(),
+                        )
+                    )
+                    self.multistart_diagnostics.append(frame_multistart_diagnostics[selected_override_key])
                 if orientation_targets is not None:
                     orientation_errors, axis_errors = self._orientation_tracking_errors(
                         q,
