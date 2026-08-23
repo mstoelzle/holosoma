@@ -53,6 +53,15 @@ from utils import (  # type: ignore[import-not-found,no-redef]  # noqa: E402
 from viser_utils import create_motion_control_sliders  # type: ignore[import-not-found,no-redef]  # noqa: E402
 
 
+def _solve_with_clarabel(problem: cp.Problem, *, verbose: bool) -> None:
+    """Solve after canonicalizing without CVXCORE's signed 32-bit ID limit."""
+    problem.solve(
+        solver=cp.CLARABEL,
+        verbose=verbose,
+        canon_backend=cp.SCIPY_CANON_BACKEND,
+    )
+
+
 class InteractionMeshRetargeter:
     """
     A class to perform kinematic retargeting from human motion to a robot,
@@ -880,12 +889,11 @@ class InteractionMeshRetargeter:
         problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
 
         # -------- Solve with Clarabel --------
-        solver_kwargs = {"verbose": verbose}
-        problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+        _solve_with_clarabel(problem, verbose=verbose)
         if (problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE)) and init_t:
             constraints = [c for c in constraints if not isinstance(c, cp.constraints.second_order.SOC)]
             problem = cp.Problem(cp.Minimize(cp.sum(obj_terms)), constraints)
-            problem.solve(solver=cp.CLARABEL, **solver_kwargs)
+            _solve_with_clarabel(problem, verbose=verbose)
 
         if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
             raise RuntimeError(f"CVXPY solve failed: {problem.status}")

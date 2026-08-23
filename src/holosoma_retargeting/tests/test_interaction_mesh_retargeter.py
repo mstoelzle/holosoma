@@ -8,7 +8,9 @@ import cvxpy as cp
 import mujoco
 import numpy as np
 import pytest
+from cvxpy.lin_ops import lin_utils
 from holosoma_retargeting.config_types.retargeter import FootLockConfig
+from holosoma_retargeting.src import interaction_mesh_retargeter as retargeter_module
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 
 
@@ -65,6 +67,22 @@ def test_environment_non_penetration_constraints_are_disabled_by_config() -> Non
     )
 
     assert constraints == []
+
+
+def test_clarabel_solve_canonicalizes_ids_beyond_int32(monkeypatch: pytest.MonkeyPatch) -> None:
+    int32_max = int(np.iinfo(np.int32).max)
+    monkeypatch.setattr(lin_utils.ID_COUNTER, "count", int32_max - 16)
+    variable = cp.Variable(2)
+    problem = cp.Problem(
+        cp.Minimize(cp.sum_squares(variable)),
+        [variable >= 1.0, cp.norm(variable) <= 3.0],
+    )
+
+    retargeter_module._solve_with_clarabel(problem, verbose=False)
+
+    assert lin_utils.ID_COUNTER.count > int32_max
+    assert problem.status == cp.OPTIMAL
+    np.testing.assert_allclose(variable.value, np.ones(2), atol=1e-5)
 
 
 def test_environment_non_penetration_constraints_are_enabled_by_default() -> None:
