@@ -16,6 +16,10 @@ from holosoma_retargeting.examples.xsens_tennis.analyze_hand_racket_motion impor
     rotations_from_wxyz,
     run_analysis,
 )
+from holosoma_retargeting.examples.xsens_tennis.tennis_racket_plotting import (
+    racket_local_lines,
+    transform_racket_points,
+)
 from scipy.spatial.transform import Rotation
 
 
@@ -81,6 +85,24 @@ def test_angular_speed_respects_irregular_timestamps() -> None:
     rotations = Rotation.from_euler("z", [[0.0], [0.1], [0.4]])
 
     np.testing.assert_allclose(angular_speed(rotations, times_s), 1.0, atol=1e-12)
+
+
+def test_shared_racket_plot_geometry_uses_longitudinal_local_x_axis() -> None:
+    shaft, hoop, throat_left, throat_right = racket_local_lines()
+
+    np.testing.assert_allclose(shaft[:, 1:], 0.0)
+    assert np.ptp(hoop[:, 0]) > np.ptp(hoop[:, 2])
+    assert np.allclose(hoop[:, 1], 0.0)
+    assert throat_left[-1, 2] == pytest.approx(-throat_right[-1, 2])
+
+    transformed = transform_racket_points(
+        shaft,
+        np.array([1.0, 2.0, 3.0]),
+        Rotation.from_euler("z", 90.0, degrees=True),
+    )
+    np.testing.assert_allclose(transformed[:, 0], 1.0, atol=1e-12)
+    np.testing.assert_allclose(transformed[:, 1], 2.0 + shaft[:, 0], atol=1e-12)
+    np.testing.assert_allclose(transformed[:, 2], 3.0, atol=1e-12)
 
 
 def test_calibration_window_inference_uses_first_good_tpose_and_next_calibration() -> None:

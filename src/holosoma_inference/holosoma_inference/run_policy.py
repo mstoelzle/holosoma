@@ -22,6 +22,7 @@ from holosoma_inference.config.config_values.inference import get_annotated_infe
 from holosoma_inference.policies.dual_mode import DualModePolicy, _select_policy_class
 from holosoma_inference.utils.config_registry import parse_config
 from holosoma_inference.utils.misc import restore_terminal_settings
+from holosoma_inference.utils.session_recorder import SessionRecorder
 
 
 def _print_control_guide(policy_class, use_joystick: bool, dual_mode: bool = False):
@@ -120,7 +121,10 @@ def run_policy(config: InferenceConfig):
         logger.info("✅ Policy initialized successfully!")
         use_joystick = bool({"joystick", "interface"} & {config.task.velocity_input, config.task.state_input})
         _print_control_guide(policy_class, use_joystick, dual_mode=dual_mode)
-        policy.run()
+        # Optional per-session rosbag: records ros2 bag record --all for this run
+        # only, stopping (and printing the bag path) on Ctrl-C / completion / error.
+        with SessionRecorder.from_debug_config(config.task.debug):
+            policy.run()
         logger.info("✅ Policy execution completed!")
 
     except Exception as e:

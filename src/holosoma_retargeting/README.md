@@ -57,6 +57,20 @@ python examples/parallel_robot_retarget.py --data-dir demo_data/climb --task-typ
 
 **Note**: Add `--augmentation` to run original sequences and sequences with augmentation (for object interaction and climbing tasks).
 
+## Checkpointing Long Retargeting Runs
+
+Single-sequence and batch retargeting save an atomic recovery sidecar every 100 accepted frames by default. For a
+result named `sequence.npz`, the sidecar is `sequence.checkpoint.npz`. Resume is explicit:
+
+```bash
+python examples/robot_retarget.py ... --resume
+python examples/parallel_robot_retarget.py ... --resume
+```
+
+Use `--checkpoint-interval-frames N` to change the cadence. Setting it to `0` disables checkpointing and cannot be
+combined with `--resume`. A successful run atomically installs the normal result archive and then deletes its
+checkpoint. Resume assumes the same inputs and optimizer configuration; incompatible or corrupt sidecars are rejected.
+
 ## Xsens Tennis Retargeting
 
 ActionNet-style Xsens HDF5 files can be retargeted as robot-only G1 motions with `--data_format xsens`.
@@ -91,6 +105,116 @@ python examples/parallel_robot_retarget.py \
 
 When `--save-dir` is omitted, the output directory is inferred from the input dataset. The examples above save to
 `demo_results/g1/robot_only/xsens_tennis` and `demo_results_parallel/g1/robot_only/xsens_tennis`, respectively.
+
+### Tennis-racket orientation modes and attachment calibration
+
+The physical G1 can use three right-hand orientation targets. `hand` is the backward-compatible default,
+`racket` always follows `RightHandSword`, and `filtered` trials both equivalent racket targets before falling back
+to the Xsens hand when the prop is detached or the target is infeasible. A 180-degree rotation about the racket's
+local longitudinal `+X` axis is treated as equivalent. Filtered mode enforces joint limits, requires five feasible
+frames to enter, uses 45-degree entry and 60-degree exit residuals, and keeps 5 degrees of wrist-limit margin.
+The observed 45–60 degree hand/racket relative rotations are not pre-filtered.
+
+```bash
+# Always target the racket orientation.
+python examples/robot_retarget.py ... \
+    --retargeter.orientation.tennis-racket.mode racket
+
+# Feasibility-filtered target with the default 45°/60° hysteresis.
+python examples/robot_retarget.py ... \
+    --retargeter.orientation.tennis-racket.mode filtered
+
+# Inspect/edit the single right_rubber_hand_link → racket transform and save an override.
+python examples/xsens_tennis/calibrate_racket_attachment.py \
+    --save-path tennis_racket_attachment_override.json
+```
+
+Pass an override with `--retargeter.orientation.tennis-racket.attachment-path`. The default `embedded_tpose` source
+applies the recording's embedded hand-to-sword T-pose correction to the global, palm-centered G1 grasp. Use
+`attachment-source global` to disable the sequence-specific correction, or `attachment-source observed_window
+--observed-window-s START END` to apply a mean correction over an explicit good-pose time window. The calibration
+viewer reports whether the finite grip contacts the calibrated central palm patch; thumb and distal-finger
+protrusions are excluded from this validation.
+
+Raw results now store achieved racket position/orientation, per-frame tracking state, selected symmetry branch,
+symmetry-aware residual, source-origin deviation, wrist-limit margin, and the effective versioned attachment.
+The conversion tool resamples these arrays with linear interpolation, quaternion SLERP, and previous-hold discrete
+states. The Viser player and analyzer use saved achieved poses when present and reconstruct legacy results through
+the same shared attachment. Analysis summaries report symmetry-aware coverage at 30°, 45°, 60°, and 75°.
+
+To inspect the achieved G1 racket directly against the nearest 0°/180°-equivalent Xsens target, generate a static
+timeline, per-frame CSV, JSON summary, and animated target-versus-achieved orientation plot with:
+
+```bash
+python examples/xsens_tennis/analyze_g1_racket_target_error.py \
+    --xsens-hdf5 <recording.hdf5> \
+    --retargeted-npz <retargeting-result.npz> \
+    --output-dir <analysis-directory>
+```
+
+For a retargeted excerpt, pass its first source frame with `--source-frame-start`. The animation traverses the whole
+selected interval in a configurable duration and shows the global/local error histories, current tracking state,
+wrist margin, symmetry branch, and target/achieved racket-frame axes.
+
+### Analyze Xsens-to-G1 retargeting quality
+
+`examples/xsens_tennis/analyze_xsens_g1_retargeting.py` compares the human Xsens recording, its G1-sized Xsens
+targets, and the retargeted physical G1. One or more sequence names are required; there is intentionally no default
+sequence. Names may include `.hdf5` or `.h5`, but must be basenames rather than paths:
+
+```bash
+python examples/xsens_tennis/analyze_xsens_g1_retargeting.py \
+    --sequence-names <sequence-name>
+
+python examples/xsens_tennis/analyze_xsens_g1_retargeting.py \
+    --sequence-names <first-sequence> <second-sequence>
+```
+
+For each stem, the command resolves the recording from `demo_data/xsens_tennis/<stem>.hdf5` (or `.h5`), the exact
+standard retarget from `demo_results/g1/robot_only/xsens_tennis/<stem>.npz`, and writes analysis artifacts under
+`demo_results/g1/analysis/xsens_tennis/<stem>/`. A batch additionally writes `batch_summary.csv` and
+`batch_summary.json` at the analysis root. Use `--data-dir`, `--retargeted-results-dir`, or `--output-root` to change
+those locations. In particular, staged or experimental retargets must be selected explicitly with
+`--retargeted-results-dir`; similarly named NPZ files are never selected heuristically. `--hdf5-path` and
+`--qpos-npz` are single-sequence overrides.
+
+The analysis exports per-frame and per-window CSVs, a machine-readable JSON summary, a Markdown report, and PNG/PDF
+figures for stability margins, error distributions, support-polygon keyframes, and local racket trajectories. The
+human Xsens motion is the error reference. Both world and full six-DoF root-relative CoM/racket errors are reported;
+here the root is the Xsens pelvis or MuJoCo G1 pelvis. The G1-sized avatar CoM is an explicitly documented proxy that
+attaches the physical G1 masses and calibrated inertial centroids to reduced Xsens segments. T-pose calibration is
+cached in each sequence's output directory unless `--tpose-calibration-path` is supplied.
+
+Use Viser for a synchronized diagnostic player or automated recordings. Viser modes accept exactly one sequence:
+
+```bash
+python examples/xsens_tennis/analyze_xsens_g1_retargeting.py \
+    --sequence-names <sequence-name> \
+    --viser-mode interactive
+
+# Record the complete selected analysis interval. Open the printed Viser URL
+# so its browser renderer can capture the video.
+python examples/xsens_tennis/analyze_xsens_g1_retargeting.py \
+    --sequence-names <sequence-name> \
+    --viser-mode record \
+    --record-path <output.mp4>
+
+# Record each automatically selected diagnostic clip.
+python examples/xsens_tennis/analyze_xsens_g1_retargeting.py \
+    --sequence-names <sequence-name> \
+    --viser-mode record-clips
+```
+
+The player offers overlay and side-by-side layouts, playback controls, automatic camera following, per-actor
+visibility controls, actor-specific support polygons, CoM projections, racket trails, and live G1-versus-human error
+values. Overlay mode is enabled by default because `--actor-spacing-m` defaults to `0.0`. It aligns the human and
+G1-sized Xsens pelvis positions with the physical G1 pelvis in the XY plane at every displayed frame while preserving
+each actor's original Z coordinate; it changes only the display transforms and leaves all world- and root-relative
+metrics unchanged. Set a positive `--actor-spacing-m` to start in side-by-side mode. Enable camera following initially
+with `--camera-follow`, or toggle `Automatically follow subjects` in the Camera folder. Full recordings can be
+restricted with `--record-start-frame`, `--record-end-frame` (inclusive), and `--record-stride`; `--record-fps`
+overrides the motion FPS. Recorded diagnostic clips use automatically selected, non-overlapping windows around worst
+racket position/orientation errors, the worst stability-margin discrepancy, and representative labeled activities.
 
 Use the legacy direct-human position targets for comparison or regression runs with:
 

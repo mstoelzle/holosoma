@@ -23,6 +23,10 @@ from holosoma_retargeting.src.mujoco_utils import (
     resolve_mujoco_frame,
     resolve_mujoco_frames,
 )
+from holosoma_retargeting.transformation_utils import (
+    rotation_matrices_as_wxyz,
+    rotation_matrices_from_wxyz,
+)
 from holosoma_retargeting.xsens.orientation_tracking import build_xsens_axis_calibration_metadata
 
 CALIBRATION_POSITION_MAPPING = {
@@ -252,17 +256,6 @@ def _normalize(vector: np.ndarray, fallback: np.ndarray | None = None) -> np.nda
 
 def _segment_index(name: str) -> int:
     return XSENS_DEMO_JOINTS.index(name)
-
-
-def _quat_wijk_to_matrix(quaternions_wijk: np.ndarray) -> np.ndarray:
-    q = np.asarray(quaternions_wijk, dtype=float)
-    xyzw = np.stack([q[..., 1], q[..., 2], q[..., 3], q[..., 0]], axis=-1)
-    return Rotation.from_quat(xyzw).as_matrix()
-
-
-def _matrix_to_quat_wijk(matrix: np.ndarray) -> np.ndarray:
-    xyzw = Rotation.from_matrix(matrix).as_quat()
-    return np.array([xyzw[3], xyzw[0], xyzw[1], xyzw[2]], dtype=float)
 
 
 def compute_canonical_axes(positions_m: np.ndarray) -> np.ndarray:
@@ -805,18 +798,18 @@ def _orientation_offsets(
     mapping: dict[str, str],
 ) -> dict[str, np.ndarray]:
     problem.set_qpos(qpos)
-    xsens_rotations = _quat_wijk_to_matrix(quaternions_wijk)
+    xsens_rotations = rotation_matrices_from_wxyz(quaternions_wijk)
     offsets = {}
     for xsens_name, link_name in mapping.items():
         xsens_idx = _segment_index(xsens_name)
         robot_rotation = problem._frame_rotation(link_name)
         offset = xsens_rotations[xsens_idx].T @ robot_rotation
-        offsets[xsens_name] = _matrix_to_quat_wijk(offset)
+        offsets[xsens_name] = rotation_matrices_as_wxyz(offset, canonical=False)
     return offsets
 
 
 def _offset_angle_deg(offset_wijk: np.ndarray) -> float:
-    matrix = _quat_wijk_to_matrix(np.asarray(offset_wijk).reshape(1, 4))[0]
+    matrix = rotation_matrices_from_wxyz(np.asarray(offset_wijk).reshape(1, 4))[0]
     return float(np.degrees(np.linalg.norm(Rotation.from_matrix(matrix).as_rotvec())))
 
 

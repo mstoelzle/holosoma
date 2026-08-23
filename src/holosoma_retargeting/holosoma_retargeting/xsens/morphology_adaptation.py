@@ -26,7 +26,7 @@ from holosoma_retargeting.kinematics import (
     SurfacePoseEvaluator,
     with_body_attachments,
 )
-from holosoma_retargeting.kinematics.model import rotate_vector
+from holosoma_retargeting.transformation_utils import rotate_vector
 from holosoma_retargeting.xsens.g1_kinematic_reduction import (
     G1XsensReductionConfig,
     build_g1_proportioned_xsens_tree,

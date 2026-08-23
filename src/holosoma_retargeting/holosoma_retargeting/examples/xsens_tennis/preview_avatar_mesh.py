@@ -16,6 +16,7 @@ if str(src_root) not in sys.path:
     sys.path.insert(0, str(src_root))
 
 from holosoma_retargeting.xsens.avatar_mesh import (  # noqa: E402
+    XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
     AvatarMeshPart,
     build_tennis_racket_meshes,
     build_xsens_avatar_meshes,
@@ -58,7 +59,7 @@ def make_preview(config: XsensAvatarMeshPreviewConfig) -> viser.ViserServer:
     proportions = load_xsens_avatar_proportions(config.hdf5_path, variant=config.tpose_variant)
     avatar_parts = build_xsens_avatar_meshes(proportions, sections=config.sections)
     validate_avatar_mesh_parts(avatar_parts)
-    racket_parts = build_tennis_racket_meshes()
+    racket_parts = build_tennis_racket_meshes(visual_offset_m=XSENS_TENNIS_RACKET_VISUAL_OFFSET_M)
 
     server = viser.ViserServer(port=config.port)
     server.scene.set_up_direction("+z")

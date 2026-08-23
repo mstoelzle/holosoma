@@ -20,8 +20,10 @@ from holosoma_retargeting.kinematics import (
     compute_reference_joint_positions,
     validate_kinematic_tree,
 )
+from holosoma_retargeting.transformation_utils import rotations_from_wxyz
 from holosoma_retargeting.usd import create_usd_stage, validate_usd_kinematic_tree, write_kinematic_tree_to_stage
 from holosoma_retargeting.xsens.avatar_mesh import (
+    G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M,
     LIGHT_GRAY,
     AvatarMeshPart,
     XsensAvatarProportions,
@@ -37,7 +39,7 @@ from holosoma_retargeting.xsens.kinematic_model import (
     canonical_xsens_segment_name,
 )
 
-G1_XSENS_REDUCTION_VERSION = "11"
+G1_XSENS_REDUCTION_VERSION = "14"
 XSENS_JOINT_STREAM_NAMES = (
     "body_joint_angles_eulerZXY_xyz_rad",
     "body_joint_angles_eulerXZY_xyz_rad",
@@ -160,18 +162,6 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _quat_matrix(quaternion_wxyz: np.ndarray) -> np.ndarray:
-    w, x, y, z = np.asarray(quaternion_wxyz, dtype=float)
-    return np.array(
-        [
-            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-        ],
-        dtype=float,
-    )
-
-
 def _static_body_transforms(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
     """Compose fixed body transforms without creating MjData or evaluating qpos."""
 
@@ -180,7 +170,7 @@ def _static_body_transforms(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarr
     for body_id in range(1, model.nbody):
         parent_id = int(model.body_parentid[body_id])
         parent_rotation = rotations[parent_id]
-        rotations[body_id] = parent_rotation @ _quat_matrix(model.body_quat[body_id])
+        rotations[body_id] = parent_rotation @ rotations_from_wxyz(model.body_quat[body_id]).as_matrix()
         positions[body_id] = positions[parent_id] + parent_rotation @ np.asarray(model.body_pos[body_id])
     return positions, rotations
 
@@ -237,7 +227,7 @@ def _geom_mesh_points(
     start = int(model.mesh_vertadr[mesh_id])
     count = int(model.mesh_vertnum[mesh_id])
     vertices = np.asarray(model.mesh_vert[start : start + count], dtype=float)
-    geom_rotation = _quat_matrix(model.geom_quat[geom_id])
+    geom_rotation = rotations_from_wxyz(model.geom_quat[geom_id]).as_matrix()
     geom_position = np.asarray(model.geom_pos[geom_id], dtype=float)
     body_id = int(model.geom_bodyid[geom_id])
     local_points = vertices @ geom_rotation.T + geom_position
@@ -274,6 +264,44 @@ def _transverse_radii(points: np.ndarray, start: np.ndarray, end: np.ndarray) ->
         [
             np.ptp(centered @ basis_a) * 0.5,
             np.ptp(centered @ basis_b) * 0.5,
+        ]
+    )
+    return np.maximum(extents, 0.008)
+
+
+def _hand_transverse_radii(points: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    """Return palm thickness and full hand width from a complete hand mesh.
+
+    The G1 rubber-hand mesh includes curled fingers. Its global transverse
+    bounding box therefore combines the palm-side extreme of the proximal
+    mesh with a finger-side extreme at the tip and is much thicker than any
+    physical cross-section. Use the proximal 45 percent of the mesh for palm
+    thickness while retaining the full mesh envelope for hand width.
+    """
+
+    axis = np.asarray(end - start, dtype=float)
+    norm = float(np.linalg.norm(axis))
+    if norm <= 1e-10:
+        return np.array([0.025, 0.025])
+    axis /= norm
+    reference = np.array([1.0, 0.0, 0.0])
+    if abs(float(np.dot(reference, axis))) > 0.9:
+        reference = np.array([0.0, 1.0, 0.0])
+    thickness_axis = reference - float(np.dot(reference, axis)) * axis
+    thickness_axis /= np.linalg.norm(thickness_axis)
+    width_axis = np.cross(axis, thickness_axis)
+
+    centered = points - start
+    longitudinal = centered @ axis
+    longitudinal_min = float(longitudinal.min())
+    longitudinal_span = float(np.ptp(longitudinal))
+    proximal = centered[longitudinal <= longitudinal_min + 0.45 * longitudinal_span]
+    if proximal.size == 0:
+        proximal = centered
+    extents = np.array(
+        [
+            np.ptp(proximal @ thickness_axis) * 0.5,
+            np.ptp(centered @ width_axis) * 0.5,
         ]
     )
     return np.maximum(extents, 0.008)
@@ -342,7 +370,11 @@ def extract_g1_anthropometry(robot_model_path: str | Path | None = None) -> G1An
                     body_rotations,
                     geom_names[metric],
                 )
-                radii_by_side[f"{side}_{metric}"] = _transverse_radii(mesh_points, start, end)
+                radii_by_side[f"{side}_{metric}"] = (
+                    _hand_transverse_radii(mesh_points, start, end)
+                    if metric == "hand"
+                    else _transverse_radii(mesh_points, start, end)
+                )
 
         offsets[f"{side}_shoulder"] = shoulder_yaw - shoulder_pitch
         offsets[f"{side}_hip"] = hip_yaw - hip_pitch
@@ -525,8 +557,7 @@ def _fit_collapsed_shoulder_morphology(
     """
 
     shoulder_path_length = sum(
-        float(np.linalg.norm(edge))
-        for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
+        float(np.linalg.norm(edge)) for edge in anthropometry.compound_offset_edges_m[f"{side}_shoulder"]
     )
     tpose_target = np.array([0.0, sign * shoulder_path_length, 0.0])
     npose_target = _canonical_upper_limb_offsets(anthropometry)[f"{side}_shoulder"].copy()
@@ -556,9 +587,7 @@ def _fit_collapsed_shoulder_morphology(
     parent_anchor = solution[:3]
     child_anchor = solution[3:]
     tpose_error = float(np.linalg.norm(parent_anchor - child_anchor - tpose_target))
-    npose_error = float(
-        np.linalg.norm(parent_anchor - npose_child_rotation @ child_anchor - npose_target)
-    )
+    npose_error = float(np.linalg.norm(parent_anchor - npose_child_rotation @ child_anchor - npose_target))
     return _ShoulderMorphologyFit(
         parent_anchor_m=parent_anchor,
         child_anchor_m=child_anchor,
@@ -761,7 +790,13 @@ def _g1_xsens_avatar_proportions_from_layout(
         landmarks[f"{side}Hand"] = {
             f"p{side}TopOfHand": np.array([0.0, sign * hand_length, 0.0]),
             f"p{side}Pinky": np.array([-hand_radii[1] * 0.55, sign * hand_length * 0.64, 0.0]),
-            f"p{side}HandPalm": np.array([hand_radii[1] * 0.55, sign * hand_length * 0.58, hand_radii[0] * 0.35]),
+            # Xsens hand frames use +Z toward the dorsum and -Z toward the
+            # palm. Keep the synthetic landmark on the same side as measured
+            # human pHandPalm landmarks so the prop anchor is not reflected
+            # through the hand.
+            f"p{side}HandPalm": np.array(
+                [hand_radii[1] * 0.55, sign * hand_length * 0.58, -hand_radii[0] * 0.35]
+            ),
         }
 
         upper_leg = f"{side}UpperLeg"
@@ -983,10 +1018,7 @@ def _shared_visual_attachments(
     neck_scale[:2] = neck_target / (neck_max[:2] - neck_min[:2])
     transforms["Neck"] = (neck_scale, np.zeros(3))
 
-    attachments = {
-        name: _scaled_part_attachments(parts, *transforms[name])
-        for name, parts in shared_parts.items()
-    }
+    attachments = {name: _scaled_part_attachments(parts, *transforms[name]) for name, parts in shared_parts.items()}
     adapter_radius = 0.72 * float(np.min(anthropometry.segment_radii_m["upper_arm"]))
     for side in ("Left", "Right"):
         upper_arm_name = f"{side}UpperArm"
@@ -1029,7 +1061,8 @@ def build_g1_proportioned_xsens_tree(
     )
     if config.include_visuals and config.include_tennis_racket:
         visual_attachments[TENNIS_RACKET_BODY] = tuple(
-            _avatar_part_attachment(part) for part in build_tennis_racket_meshes()
+            _avatar_part_attachment(part)
+            for part in build_tennis_racket_meshes(visual_offset_m=G1_XSENS_TENNIS_RACKET_VISUAL_OFFSET_M)
         )
     bodies = []
     for index, name in enumerate(body_names):

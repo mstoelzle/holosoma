@@ -62,6 +62,12 @@ class RetargetingConfig:
     save_dir: Path | None = None
     """Directory to save results. If None, derived from robot, task type, and input dataset."""
 
+    checkpoint_interval_frames: int = 100
+    """Save a recovery checkpoint after this many accepted frames. Set to 0 to disable."""
+
+    resume: bool = False
+    """Resume from a compatible sidecar checkpoint when one exists."""
+
     augmentation: bool = False
     """Whether to use augmentation."""
 

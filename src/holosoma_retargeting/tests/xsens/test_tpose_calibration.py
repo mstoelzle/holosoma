@@ -14,6 +14,10 @@ from holosoma_retargeting.data_utils.xsens_hdf5 import XSENS_BODY_SEGMENT_NAMES,
 from holosoma_retargeting.examples.robot_retarget import create_task_constants
 from holosoma_retargeting.src.interaction_mesh_retargeter import InteractionMeshRetargeter
 from holosoma_retargeting.src.mujoco_utils import evaluate_mujoco_frame_poses
+from holosoma_retargeting.transformation_utils import (
+    rotation_matrices_as_wxyz,
+    rotation_matrices_from_wxyz,
+)
 from holosoma_retargeting.xsens.orientation_tracking import (
     ARM_DIRECTION_AXIS_NAMES,
     XSENS_AXIS_SPECS,
@@ -21,8 +25,6 @@ from holosoma_retargeting.xsens.orientation_tracking import (
     build_xsens_orientation_targets,
     build_xsens_orientation_targets_from_calibration,
     load_xsens_orientation_targets,
-    matrix_to_quat_wijk,
-    quat_wijk_to_matrix,
 )
 from holosoma_retargeting.xsens.tpose_calibration import (
     CALIBRATION_POSITION_MAPPING,
@@ -171,13 +173,17 @@ def test_orientation_targets_reconstruct_from_dynamic_orientation_and_saved_offs
         calibration_path,
         active_orientation_mapping_names=np.asarray(["L5"], dtype=str),
         robot_link_names=np.asarray(["torso_link"], dtype=str),
-        orientation_offsets_wijk=matrix_to_quat_wijk(offset_rotation.reshape(1, 3, 3)),
+        orientation_offsets_wijk=rotation_matrices_as_wxyz(
+            offset_rotation.reshape(1, 3, 3),
+            canonical=False,
+        ),
         **axis_metadata,
     )
 
     motion_quaternions = np.tile(np.array([1.0, 0.0, 0.0, 0.0]), (2, len(XSENS_BODY_SEGMENT_NAMES), 1))
-    motion_quaternions[:, XSENS_BODY_SEGMENT_NAMES.index("L5")] = matrix_to_quat_wijk(
-        np.tile(dynamic_rotation, (2, 1, 1))
+    motion_quaternions[:, XSENS_BODY_SEGMENT_NAMES.index("L5")] = rotation_matrices_as_wxyz(
+        np.tile(dynamic_rotation, (2, 1, 1)),
+        canonical=False,
     )
 
     targets = load_xsens_orientation_targets(
@@ -381,7 +387,7 @@ def test_g1_tpose_calibration_smoke_on_synthetic_symmetric_tpose() -> None:
         segment_names=tpose.segment_names,
     )
     np.testing.assert_allclose(
-        quat_wijk_to_matrix(link_poses.quaternions_wxyz),
+        rotation_matrices_from_wxyz(link_poses.quaternions_wxyz),
         targets.orientation_target_rotations[0],
         atol=1e-10,
     )

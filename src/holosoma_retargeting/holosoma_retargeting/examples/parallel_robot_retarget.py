@@ -27,6 +27,8 @@ if str(src_root) not in sys.path:
 
 from holosoma_retargeting.config_types.retargeting import ParallelRetargetingConfig  # noqa: E402
 from holosoma_retargeting.config_types.robot import RobotConfig  # noqa: E402
+
+# Import reusable functions from robot_retarget.py
 from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[import-not-found]  # noqa: E402
     DEFAULT_DATA_FORMATS,
     build_retargeter_kwargs_from_config,
@@ -39,6 +41,7 @@ from holosoma_retargeting.examples.robot_retarget import (  # type: ignore[impor
     prepare_xsens_motion_for_retargeting,
     resolve_arm_orientation_mode,
     setup_object_data,
+    validate_config,
     validate_xsens_morphology_selection,
 )
 from holosoma_retargeting.src.interaction_mesh_retargeter import (  # noqa: E402
@@ -48,6 +51,10 @@ from holosoma_retargeting.src.paths import DEMO_RESULTS_PARALLEL_DIR  # noqa: E4
 from holosoma_retargeting.src.utils import (  # type: ignore[import-not-found]  # noqa: E402
     extract_foot_sticking_sequence_velocity,
     preprocess_motion_data,
+)
+from holosoma_retargeting.xsens.tennis_racket import (  # noqa: E402
+    build_tennis_racket_targets,
+    resolve_tennis_racket_attachment,
 )
 
 
@@ -161,6 +168,8 @@ def process_single_task(args):
         retargeter,
         xsens_morphology,
         augmentation,
+        checkpoint_interval_frames,
+        resume,
     ) = args
 
     os.makedirs(save_dir, exist_ok=True)
@@ -206,6 +215,14 @@ def process_single_task(args):
         hdf5_path=Path(file_path) if xsens_motion is not None else None,
         morphology_config=xsens_morphology,
     )
+    tennis_racket_targets = None
+    if xsens_motion is not None and orientation_targets is not None and "RightHandSword" in xsens_motion.segment_names:
+        racket_attachment = resolve_tennis_racket_attachment(
+            retargeter.orientation.tennis_racket,
+            motion=xsens_motion,
+            hdf5_path=Path(file_path),
+        )
+        tennis_racket_targets = build_tennis_racket_targets(xsens_motion, racket_attachment)
     if (
         orientation_targets is not None
         and orientation_targets.orientation_target_rotations.shape[0] != human_joints.shape[0]
@@ -337,8 +354,11 @@ def process_single_task(args):
             q_a_init=q_init,
             q_nominal_list=q_nominal,
             orientation_targets=orientation_targets,
+            tennis_racket_targets=tennis_racket_targets,
             original=(k == 0),
             dest_res_path=file_name,
+            checkpoint_interval_frames=checkpoint_interval_frames,
+            resume=resume,
         )
 
 
@@ -348,6 +368,8 @@ def main(cfg: ParallelRetargetingConfig) -> None:
     Args:
         cfg: Configuration arguments
     """
+    validate_config(cfg)
+
     robot = cfg.robot
     task_type = cfg.task_type
 
@@ -399,6 +421,8 @@ def main(cfg: ParallelRetargetingConfig) -> None:
             cfg.retargeter,
             cfg.xsens_morphology,
             cfg.augmentation,
+            cfg.checkpoint_interval_frames,
+            cfg.resume,
         )
         for file_path in files
     ]

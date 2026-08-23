@@ -7,7 +7,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .model import KinematicTree, rotate_vector, rotate_vectors, validate_kinematic_tree
+from holosoma_retargeting.transformation_utils import rotate_vector, rotate_vectors
+
+from .model import KinematicTree, validate_kinematic_tree
 
 
 @dataclass(frozen=True)

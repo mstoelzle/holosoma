@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import cvxpy as cp
@@ -10,6 +11,7 @@ import holosoma_retargeting.src.interaction_mesh_retargeter as retargeter_module
 import mujoco
 import numpy as np
 import pytest
+from cvxpy.lin_ops import lin_utils
 from holosoma_retargeting.config_types.data_type import MotionDataConfig
 from holosoma_retargeting.config_types.retargeter import (
     FootLockConfig,
@@ -28,7 +30,7 @@ MODEL_DIR = Path(holosoma_retargeting.__file__).parent / "models" / "g1"
 
 
 class _Progress:
-    def __init__(self, values):
+    def __init__(self, values, **_kwargs):
         self.values = values
 
     def __enter__(self):
@@ -148,6 +150,11 @@ def _motion_retargeter(
     retargeter = object.__new__(InteractionMeshRetargeter)
     retargeter.nq = 10
     retargeter.q_a_indices = np.array([0, 1], dtype=int)
+    retargeter.q_a_lb = np.full(2, -np.inf)
+    retargeter.q_a_ub = np.full(2, np.inf)
+    retargeter.activate_joint_limits = True
+    retargeter.robot_model = None
+    retargeter.robot_data = None
     retargeter.object_name = "ground"
     retargeter.smplh_mapped_joint_indices = np.array([0], dtype=int)
     retargeter.orientation_config = OrientationTrackingConfig(arm_mode=arm_orientation_mode)
@@ -159,7 +166,7 @@ def _motion_retargeter(
     retargeter.iterations_per_frame = 2
     retargeter.debug = False
     retargeter.visualize = False
-    retargeter._orientation_tracking_errors = lambda *_args: (np.zeros(1), np.zeros(1))
+    retargeter._orientation_tracking_errors = lambda *_args, **_kwargs: (np.zeros(1), np.zeros(1))
     return retargeter
 
 
@@ -168,6 +175,7 @@ def _run_stub_motion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     targets: XsensOrientationTargets,
+    tennis_racket_targets=None,
 ) -> tuple[np.ndarray, list[dict]]:
     calls: list[dict] = []
 
@@ -198,6 +206,7 @@ def _run_stub_motion(
         foot_sticking_sequences=[{"left": False, "right": False}] * num_frames,
         q_a_init=np.zeros(2),
         orientation_targets=targets,
+        tennis_racket_targets=tennis_racket_targets,
         dest_res_path=tmp_path / "retargeted.npz",
     )
     return result, calls
@@ -256,6 +265,22 @@ def test_environment_non_penetration_constraints_are_disabled_by_config() -> Non
     )
 
     assert constraints == []
+
+
+def test_clarabel_solve_canonicalizes_ids_beyond_int32(monkeypatch: pytest.MonkeyPatch) -> None:
+    int32_max = int(np.iinfo(np.int32).max)
+    monkeypatch.setattr(lin_utils.ID_COUNTER, "count", int32_max - 16)
+    variable = cp.Variable(2)
+    problem = cp.Problem(
+        cp.Minimize(cp.sum_squares(variable)),
+        [variable >= 1.0, cp.norm(variable) <= 3.0],
+    )
+
+    retargeter_module._solve_with_clarabel(problem, verbose=False)
+
+    assert lin_utils.ID_COUNTER.count > int32_max
+    assert problem.status == cp.OPTIMAL
+    np.testing.assert_allclose(variable.value, np.ones(2), atol=1e-5)
 
 
 def test_environment_non_penetration_constraints_are_enabled_by_default() -> None:
@@ -452,6 +477,43 @@ def test_frame_and_bend_targets_are_shared_by_both_stages(
     assert calls[1].get("include_position_tracking", True) is True
     assert calls[0]["orientation_targets"] is targets
     assert calls[1]["orientation_targets"] is targets
+
+
+def test_orientation_first_uses_racket_override_in_both_stages(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    override = (0, np.eye(3))
+
+    class _RacketTracker:
+        config = SimpleNamespace(mode="racket")
+
+        def solve_frame(self, _frame_index, _q, solve_frame):
+            q, cost = solve_frame(orientation_rotation_override=override)
+            return SimpleNamespace(q=q, cost=cost, orientation_override=override)
+
+        def record_frame(self, _frame_index, _solution) -> None:
+            pass
+
+        def build_motion(self):
+            return SimpleNamespace(as_npz_payload=dict)
+
+    monkeypatch.setattr(
+        retargeter_module,
+        "create_tennis_racket_frame_tracker",
+        lambda *_args, **_kwargs: _RacketTracker(),
+    )
+    _, calls = _run_stub_motion(
+        _motion_retargeter(optimization_schedule="orientation-first"),
+        monkeypatch,
+        tmp_path,
+        _orientation_targets(1),
+        tennis_racket_targets=object(),
+    )
+
+    assert len(calls) == 2
+    assert calls[0]["orientation_rotation_override"] is override
+    assert calls[1]["orientation_rotation_override"] is override
 
 
 def test_coarse_solve_excludes_position_tracking_but_keeps_orientation_terms(

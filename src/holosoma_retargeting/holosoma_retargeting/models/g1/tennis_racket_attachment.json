@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "robot_model": "g1_29dof",
+  "hand_link": "right_rubber_hand_link",
+  "position_m": [0.065915, 0.03075, 0.04697108],
+  "quaternion_wxyz": [0.7071067811865476, 0.0, -0.7071067811865476, 0.0],
+  "longitudinal_axis_local": [1.0, 0.0, 0.0],
+  "palm_bounds_min_m": [-0.00000003, -0.01865148, -0.04302892],
+  "palm_bounds_max_m": [0.1318281, 0.04790606, 0.0634499],
+  "palm_contact_bounds_min_m": [0.0500153, -0.01669491, -0.02496773],
+  "palm_contact_bounds_max_m": [0.07499168, 0.01299217, 0.02489448],
+  "source_reference_position_m": [0.021114, -0.095647, -0.010557],
+  "source_reference_quaternion_wxyz": [0.7071067811865476, -0.7071067811865476, 0.0, 0.0],
+  "notes": "G1 rubber-hand grasp calibrated against the central palmar surface, excluding thumb and distal-finger protrusions; the grip butt remains aligned to the hand edge and orientation preserves the canonical Xsens sword-frame alignment."
+}
