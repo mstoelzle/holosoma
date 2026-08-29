@@ -95,6 +95,29 @@ def test_branch_selection_tracks_nearest_realized_hand_and_prior_tie_break() -> 
     assert choose_tennis_racket_symmetry_branch(midpoint.as_matrix(), candidates, preferred_branch=1) == 1
 
 
+def test_racket_mode_preserves_underlying_solver_failure() -> None:
+    identity = np.eye(3)
+    tracker = TennisRacketFrameTracker.__new__(TennisRacketFrameTracker)
+    tracker.config = SimpleNamespace(mode="racket")
+    candidate_rotations = np.array([[identity, Rotation.from_rotvec([0.0, 0.0, np.pi]).as_matrix()]])
+    tracker.targets = SimpleNamespace(candidate_hand_rotations=np.tile(candidate_rotations, (43, 1, 1, 1)))
+    tracker.right_hand_target_index = 7
+    tracker._previous_branch = None
+    tracker._achieved_pose = lambda _q: (np.zeros(3), identity, identity)
+
+    def failing_solver(**_kwargs: object) -> tuple[np.ndarray, float]:
+        raise RuntimeError("CVXPY solve failed: user_limit")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"frame 42, symmetry branch 0: CVXPY solve failed: user_limit",
+    ) as exc_info:
+        tracker.solve_frame(42, np.zeros(36), failing_solver)
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "CVXPY solve failed: user_limit"
+
+
 def test_source_origin_deviation_detects_detached_prop() -> None:
     motion = _motion()
     sword_index = motion.segment_names.index("RightHandSword")

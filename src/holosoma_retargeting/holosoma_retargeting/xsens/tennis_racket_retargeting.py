@@ -134,20 +134,15 @@ class TennisRacketFrameTracker:
             self.targets.candidate_hand_rotations[frame_index, branch],
         )
 
-    def _trial_branch(
+    def _solve_branch(
         self,
         frame_index: int,
         branch: int,
         solve_frame: FrameSolver,
-    ) -> _BranchTrial | None:
-        try:
-            trial_q, trial_cost = solve_frame(
-                orientation_rotation_override=self._orientation_override(frame_index, branch)
-            )
-        except RuntimeError:
-            return None
+    ) -> _BranchTrial:
+        trial_q, trial_cost = solve_frame(orientation_rotation_override=self._orientation_override(frame_index, branch))
         if not np.isfinite(trial_q).all() or not np.isfinite(trial_cost):
-            return None
+            raise RuntimeError("solver returned a non-finite configuration or cost")
         _, achieved_rotation, _ = self._achieved_pose(trial_q)
         return _BranchTrial(
             branch=branch,
@@ -159,6 +154,17 @@ class TennisRacketFrameTracker:
             ),
             wrist_margin_rad=self._wrist_limit_margin(trial_q),
         )
+
+    def _trial_branch(
+        self,
+        frame_index: int,
+        branch: int,
+        solve_frame: FrameSolver,
+    ) -> _BranchTrial | None:
+        try:
+            return self._solve_branch(frame_index, branch, solve_frame)
+        except RuntimeError:
+            return None
 
     def solve_frame(
         self,
@@ -180,9 +186,12 @@ class TennisRacketFrameTracker:
         )
         branch_order = (preferred_branch, 1 - preferred_branch)
         if self.config.mode == "racket":
-            trial = self._trial_branch(frame_index, preferred_branch, solve_frame)
-            if trial is None:
-                raise RuntimeError(f"Tennis-racket solve failed at frame {frame_index}")
+            try:
+                trial = self._solve_branch(frame_index, preferred_branch, solve_frame)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"Tennis-racket solve failed at frame {frame_index}, symmetry branch {preferred_branch}: {exc}"
+                ) from exc
             self._previous_branch = preferred_branch
             return TennisRacketFrameSolution(
                 trial.q,
