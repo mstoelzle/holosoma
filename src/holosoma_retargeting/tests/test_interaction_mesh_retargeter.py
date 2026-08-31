@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import cvxpy as cp
@@ -67,6 +68,65 @@ def test_environment_non_penetration_constraints_are_disabled_by_config() -> Non
     )
 
     assert constraints == []
+
+
+def test_qdot_to_qvel_transform_handles_asymmetric_mujoco_enum_equality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = mujoco.MjModel.from_xml_string(
+        """
+        <mujoco>
+          <worldbody>
+            <body>
+              <freejoint/>
+              <geom type="sphere" size="0.1"/>
+              <body>
+                <joint name="hinge" type="hinge"/>
+                <geom type="sphere" size="0.1"/>
+                <body>
+                  <joint name="slide" type="slide"/>
+                  <geom type="sphere" size="0.1"/>
+                </body>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>
+        """
+    )
+    retargeter = object.__new__(InteractionMeshRetargeter)
+    retargeter.robot_model = model
+    retargeter.robot_data = mujoco.MjData(model)
+    retargeter.robot_data.qpos[3] = 1.0
+    retargeter.has_dynamic_object = False
+
+    class AsymmetricEnumInt(int):
+        """Reproduce pybind11 3.1 enum comparison with NumPy scalars."""
+
+        def __eq__(self, other):
+            if isinstance(other, np.generic):
+                return False
+            return super().__eq__(other)
+
+        __hash__ = int.__hash__
+
+    monkeypatch.setattr(
+        retargeter_module.mujoco,
+        "mjtJoint",
+        SimpleNamespace(
+            mjJNT_FREE=AsymmetricEnumInt(0),
+            mjJNT_BALL=AsymmetricEnumInt(1),
+            mjJNT_SLIDE=AsymmetricEnumInt(2),
+            mjJNT_HINGE=AsymmetricEnumInt(3),
+        ),
+    )
+
+    transform = retargeter._build_transform_qdot_to_qvel_fast()
+
+    for joint_name in ("hinge", "slide"):
+        joint_id = model.joint(joint_name).id
+        qpos_address = int(model.jnt_qposadr[joint_id])
+        dof_address = int(model.jnt_dofadr[joint_id])
+        assert transform[dof_address, qpos_address] == 1.0
 
 
 def test_clarabel_solve_canonicalizes_ids_beyond_int32(monkeypatch: pytest.MonkeyPatch) -> None:
